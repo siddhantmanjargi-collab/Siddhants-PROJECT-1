@@ -2350,6 +2350,17 @@
 
   const DEMO_VAULT_ITEMS = [];
 
+  function isDemoItem(item) {
+    if (!item) return false;
+    const idStr = String(item.id || '');
+    if (idStr.startsWith('demo-')) return true;
+    if (item.serialNumber === 'DCAR10582768830/00' || item.serialNumber === 'C02G4109MD6R' || item.serialNumber === 'SH-POL-8839102') return true;
+    if (item.name && item.name.includes('Maruti Celerio ZXI') && item.name.includes('ACKO')) return true;
+    if (item.name && item.name.includes('Apple MacBook Pro 16"') && item.name.includes('Warranty')) return true;
+    if (item.name && item.name.includes('Star Health Family Optima')) return true;
+    return false;
+  }
+
   function getStorageKey() {
     return 'asset_wallet_vault_' + (currentUserId || 'guest');
   }
@@ -2359,7 +2370,15 @@
       const key = getStorageKey();
       const raw = localStorage.getItem(key);
       if (!raw) return [];
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const filtered = parsed.filter(i => !isDemoItem(i));
+        if (filtered.length !== parsed.length) {
+          localStorage.setItem(key, JSON.stringify(filtered));
+        }
+        return filtered;
+      }
+      return [];
     } catch(e) {
       return [];
     }
@@ -2368,7 +2387,7 @@
   function saveLocalVault() {
     try {
       const key = getStorageKey();
-      localStorage.setItem(key, JSON.stringify(vaultItems));
+      localStorage.setItem(key, JSON.stringify(vaultItems.filter(i => !isDemoItem(i))));
     } catch(e) {}
   }
 
@@ -2401,12 +2420,19 @@
         return;
       }
       const todayIso = getTodayIsoDate();
-      const loaded = (data || []).map(row => {
-        if (row.upload_date === '2026-07-28' && todayIso === '2026-07-29') {
-          row.upload_date = todayIso;
-          db.from('assets').update({ upload_date: todayIso }).eq('id', row.id).then(()=>{});
+      const loaded = [];
+      (data || []).forEach(row => {
+        const item = rowToItem(row);
+        if (isDemoItem(item)) {
+          // Delete legacy demo record from Supabase database
+          if (row.id) db.from('assets').delete().eq('id', row.id).then(()=>{});
+        } else {
+          if (row.upload_date === '2026-07-28' && todayIso === '2026-07-29') {
+            row.upload_date = todayIso;
+            db.from('assets').update({ upload_date: todayIso }).eq('id', row.id).then(()=>{});
+          }
+          loaded.push(item);
         }
-        return rowToItem(row);
       });
       vaultItems = loaded;
       saveLocalVault();
