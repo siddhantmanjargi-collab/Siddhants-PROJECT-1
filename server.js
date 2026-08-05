@@ -64,11 +64,11 @@ app.post('/api/scan-document', async (req, res) => {
   }
 
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET;
     if (!apiKey) {
       return res.status(200).json({
         success: false,
-        error: 'GEMINI_API_KEY missing. Falling back to local OCR.',
+        error: 'GEMINI_API_KEY (or GEMINI_API_KEY_ASSET_WALLET) missing in environment variables.',
       });
     }
 
@@ -338,11 +338,17 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
     }
 
     if (!response || !response.text) {
-      const errMsg = lastError?.message || 'Gemini API call failed for all model candidates.';
-      console.warn('Gemini scan failed:', errMsg);
+      const rawErr = lastError?.message || '';
+      let userFriendlyErr = rawErr;
+      if (rawErr.includes('429') || rawErr.includes('RESOURCE_EXHAUSTED') || rawErr.includes('Quota exceeded')) {
+        userFriendlyErr = 'Google Gemini API Free Tier Quota Exceeded (429: RESOURCE_EXHAUSTED). Your Gemini API key has hit its daily/per-minute request limit.';
+      } else {
+        userFriendlyErr = `Gemini API scanner error: ${rawErr || 'All model candidates failed'}.`;
+      }
+      console.warn('Gemini scan failed:', userFriendlyErr);
       return res.status(200).json({
         success: false,
-        error: `Gemini AI scanner error: ${errMsg}. Please ensure GEMINI_API_KEY is valid.`,
+        error: userFriendlyErr,
       });
     }
 
