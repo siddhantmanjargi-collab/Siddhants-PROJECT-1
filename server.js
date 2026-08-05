@@ -64,11 +64,21 @@ app.post('/api/scan-document', async (req, res) => {
   }
 
   try {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET;
+    let apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
+    if (!apiKey) {
+      const foundKeyName = Object.keys(process.env).find(
+        (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]
+      );
+      if (foundKeyName) {
+        apiKey = process.env[foundKeyName];
+        console.log(`Using Gemini API key from environment variable: ${foundKeyName}`);
+      }
+    }
+
     if (!apiKey) {
       return res.status(200).json({
         success: false,
-        error: 'GEMINI_API_KEY (or GEMINI_API_KEY_ASSET_WALLET) missing in environment variables.',
+        error: 'No Gemini API key found in environment variables (e.g. GEMINI_API_KEY or similar).',
       });
     }
 
@@ -94,14 +104,7 @@ app.post('/api/scan-document', async (req, res) => {
       });
     }
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
+    const ai = new GoogleGenAI({ apiKey });
 
     const parts = [];
     if (base64Data && mimeType) {
@@ -219,12 +222,9 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
     parts.push({ text: textContent });
 
     const candidateModels = [
-      'gemini-2.5-flash',
       'gemini-2.0-flash',
       'gemini-1.5-flash',
-      'gemini-3.6-flash',
-      'gemini-flash-latest',
-      'gemini-2.5-pro'
+      'gemini-1.5-pro'
     ];
     let response = null;
     let lastError = null;
@@ -321,7 +321,13 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
         });
         if (response && response.text) break;
       } catch (modelErr) {
-        console.warn(`Model ${modelName} with schema failed:`, modelErr?.message || modelErr);
+        const errMsg = modelErr?.message || String(modelErr);
+        console.warn(`Model ${modelName} with schema failed:`, errMsg);
+        lastError = modelErr;
+        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('Quota exceeded')) {
+          break;
+        }
+
         // Fallback retry with JSON mode without schema
         try {
           response = await ai.models.generateContent({
@@ -331,8 +337,12 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           });
           if (response && response.text) break;
         } catch (jsonErr) {
-          console.warn(`Model ${modelName} JSON mode failed:`, jsonErr?.message || jsonErr);
+          const jsonErrMsg = jsonErr?.message || String(jsonErr);
+          console.warn(`Model ${modelName} JSON mode failed:`, jsonErrMsg);
           lastError = jsonErr;
+          if (jsonErrMsg.includes('429') || jsonErrMsg.includes('RESOURCE_EXHAUSTED') || jsonErrMsg.includes('Quota exceeded')) {
+            break;
+          }
         }
       }
     }
