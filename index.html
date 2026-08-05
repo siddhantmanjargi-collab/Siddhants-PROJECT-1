@@ -3281,6 +3281,7 @@
     }, 300);
 
     let aiResult = null;
+    let aiScanNotice = null;
     try {
       let base64Data = null;
       let mimeType = 'image/jpeg';
@@ -3306,9 +3307,12 @@
       const json = await res.json();
       if(res.ok && json.success && json.data){
         aiResult = json.data;
+      } else {
+        aiScanNotice = (json && json.error) ? json.error : `Server returned ${res.status}`;
       }
     } catch(err) {
       console.warn('AI scan service unavailable, using local OCR fallback', err);
+      aiScanNotice = 'Unable to reach backend /api/scan-document endpoint.';
       clearInterval(progressTimer);
     }
 
@@ -3330,10 +3334,10 @@
           const { data } = await worker.recognize(capturedDataUrl);
           text = data.text || '';
         }
-        showReview(text);
+        showReview(text, aiScanNotice);
       }catch(err){
         console.error('Fallback extraction failed', err);
-        showReview(preExtractedText || '');
+        showReview(preExtractedText || '', aiScanNotice);
       }
     }
   });
@@ -3900,11 +3904,30 @@
 
   let selectedChipDate = null;
 
-  function showReview(rawText){
+  function showReview(rawText, aiScanNotice){
     editingAssetId = null;
     document.getElementById('review-eyebrow').textContent = 'Confirm details';
     document.getElementById('review-heading').textContent = "Here's what we found";
     document.getElementById('review-subtitle').textContent = 'Extracted automatically — check it over before saving.';
+
+    const aiBadge = document.getElementById('ai-extracted-badge');
+    if (aiBadge) aiBadge.style.display = 'none';
+
+    const pipelineCard = document.getElementById('pipeline-analysis-card');
+    if (pipelineCard) {
+      if (aiScanNotice) {
+        pipelineCard.style.display = 'block';
+        pipelineCard.innerHTML = `
+          <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3); color: var(--text-main); padding: 12px 16px; border-radius: 10px; font-size: 13px; line-height: 1.5; margin-bottom: 16px;">
+            <strong style="color: #facc15; display: block; margin-bottom: 4px;">⚠️ Local OCR Fallback Used</strong>
+            Gemini AI scan was skipped: <em>${escapeHtmlStr(aiScanNotice)}</em>. If deploying on Vercel, make sure <code>GEMINI_API_KEY</code> is set in your Vercel Environment Variables.
+          </div>
+        `;
+      } else {
+        pipelineCard.style.display = 'none';
+        pipelineCard.innerHTML = '';
+      }
+    }
 
     const thumbEl = document.getElementById('review-thumb');
     const filenameEl = document.getElementById('review-filename');

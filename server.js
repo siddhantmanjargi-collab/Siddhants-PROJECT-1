@@ -218,7 +218,14 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
     }
     parts.push({ text: textContent });
 
-    const candidateModels = ['gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    const candidateModels = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-3.6-flash',
+      'gemini-flash-latest',
+      'gemini-2.5-pro'
+    ];
     let response = null;
     let lastError = null;
 
@@ -328,6 +335,15 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           lastError = jsonErr;
         }
       }
+    }
+
+    if (!response || !response.text) {
+      const errMsg = lastError?.message || 'Gemini API call failed for all model candidates.';
+      console.warn('Gemini scan failed:', errMsg);
+      return res.status(200).json({
+        success: false,
+        error: `Gemini AI scanner error: ${errMsg}. Please ensure GEMINI_API_KEY is valid.`,
+      });
     }
 
     let data = {};
@@ -499,7 +515,11 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+export default app;
 
