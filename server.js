@@ -64,7 +64,7 @@ app.post('/api/scan-document', async (req, res) => {
   }
 
   try {
-    let apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
+    let apiKey = req.headers['x-gemini-key'] || req.body?.userApiKey || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
     if (!apiKey) {
       const foundKeyName = Object.keys(process.env).find(
         (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]
@@ -222,8 +222,10 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
     parts.push({ text: textContent });
 
     const candidateModels = [
+      'gemini-2.5-flash',
       'gemini-2.0-flash',
       'gemini-1.5-flash',
+      'gemini-2.5-pro',
       'gemini-1.5-pro'
     ];
     let response = null;
@@ -324,9 +326,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
         const errMsg = modelErr?.message || String(modelErr);
         console.warn(`Model ${modelName} with schema failed:`, errMsg);
         lastError = modelErr;
-        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('Quota exceeded')) {
-          break;
-        }
 
         // Fallback retry with JSON mode without schema
         try {
@@ -340,9 +339,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           const jsonErrMsg = jsonErr?.message || String(jsonErr);
           console.warn(`Model ${modelName} JSON mode failed:`, jsonErrMsg);
           lastError = jsonErr;
-          if (jsonErrMsg.includes('429') || jsonErrMsg.includes('RESOURCE_EXHAUSTED') || jsonErrMsg.includes('Quota exceeded')) {
-            break;
-          }
         }
       }
     }
