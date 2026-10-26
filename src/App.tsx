@@ -3,23 +3,20 @@ import {
   Sparkles,
   Plus,
   Search,
-  LogOut,
   ShieldCheck,
-  AlertTriangle,
-  Clock,
-  Layers,
-  FileText,
-  UserCheck
+  AlertTriangle
 } from 'lucide-react';
 import { Asset, User } from './types/asset';
 import {
   getStoredUser,
   setStoredUser,
-  getStoredAssets,
-  saveStoredAssets,
-  getAssetStatus,
-  calculateDaysRemaining
+  getAssetStatus
 } from './utils/storage';
+import {
+  fetchUserAssetsFromCloud,
+  saveUserAssetToCloud,
+  deleteUserAssetFromCloud
+} from './lib/supabase';
 import { AuthScreen } from './components/AuthScreen';
 import { StatsBar } from './components/StatsBar';
 import { CategoryFilter } from './components/CategoryFilter';
@@ -31,11 +28,11 @@ import { AddAssetModal } from './components/AddAssetModal';
 export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(getStoredUser());
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [isLoadingAssets, setIsLoadingAssets] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'safe' | 'warn' | 'danger'>('all');
 
-  // Modals state
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [isScanOpen, setIsScanOpen] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -43,37 +40,52 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (user) {
-      const loaded = getStoredAssets();
-      setAssets(loaded);
+      setIsLoadingAssets(true);
+      fetchUserAssetsFromCloud(user.id).then((cloudAssets) => {
+        setAssets(cloudAssets);
+        setIsLoadingAssets(false);
+      });
+    } else {
+      setAssets([]);
     }
   }, [user]);
 
-  const handleSaveAssets = (newAssets: Asset[]) => {
-    setAssets(newAssets);
-    saveStoredAssets(newAssets);
-  };
+  const handleAddOrEditAsset = async (
+    assetData: Omit<Asset, 'id' | 'userId' | 'createdAt' | 'updatedAt'> | Asset
+  ) => {
+    if (!user) return;
 
-  const handleAddAsset = (assetData: Omit<Asset, 'id' | 'userId' | 'createdAt' | 'updatedAt'> | Asset) => {
+    let targetAsset: Asset;
     if ('id' in assetData && assetData.id) {
-      // Edit existing
-      const updated = assets.map((a) => (a.id === assetData.id ? (assetData as Asset) : a));
-      handleSaveAssets(updated);
+      targetAsset = {
+        ...(assetData as Asset),
+        updatedAt: new Date().toISOString(),
+      };
     } else {
-      // Create new
-      const newAsset: Asset = {
+      targetAsset = {
         ...(assetData as Omit<Asset, 'id' | 'userId' | 'createdAt' | 'updatedAt'>),
-        id: `asset-${Date.now()}`,
-        userId: user?.id || 'demo-user',
+        id: `ast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        userId: user.id,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      handleSaveAssets([newAsset, ...assets]);
     }
+
+    setAssets((prev) => {
+      const exists = prev.some((a) => a.id === targetAsset.id);
+      if (exists) {
+        return prev.map((a) => (a.id === targetAsset.id ? targetAsset : a));
+      }
+      return [targetAsset, ...prev];
+    });
+
+    await saveUserAssetToCloud(targetAsset);
   };
 
-  const handleDeleteAsset = (id: string) => {
-    const filtered = assets.filter((a) => a.id !== id);
-    handleSaveAssets(filtered);
+  const handleDeleteAsset = async (id: string) => {
+    if (!user) return;
+    setAssets((prev) => prev.filter((a) => a.id !== id));
+    await deleteUserAssetFromCloud(id, user.id);
   };
 
   const handleLogout = () => {
@@ -81,7 +93,6 @@ export const App: React.FC = () => {
     setUser(null);
   };
 
-  // Urgent alerts calculation
   const urgentAlerts = useMemo(() => {
     return assets.filter((a) => {
       const st = getAssetStatus(a.expiryDate);
@@ -89,21 +100,17 @@ export const App: React.FC = () => {
     });
   }, [assets]);
 
-  // Filtered Assets list
   const filteredAssets = useMemo(() => {
     return assets.filter((a) => {
-      // Category filter
       if (selectedCategory !== 'all' && a.category !== selectedCategory) {
         return false;
       }
 
-      // Status filter
       if (statusFilter !== 'all') {
         const st = getAssetStatus(a.expiryDate);
         if (st !== statusFilter) return false;
       }
 
-      // Search query filter
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchName = a.assetName.toLowerCase().includes(q);
@@ -118,7 +125,6 @@ export const App: React.FC = () => {
     });
   }, [assets, selectedCategory, statusFilter, searchQuery]);
 
-  // Group assets by category
   const groupedAssets = useMemo(() => {
     const groups: Record<string, Asset[]> = {};
     filteredAssets.forEach((a) => {
@@ -135,72 +141,116 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen pb-16">
-      {/* Top Navbar */}
-      <header className="bg-[#16261F]/90 backdrop-blur-md border-b border-[#2A3B33] sticky top-0 z-30 px-4 py-3">
-        <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#C9A15D]/20 border border-[#C9A15D]/40 flex items-center justify-center text-[#E4C98A] font-serif font-bold text-sm">
-              AV
-            </div>
-            <div>
-              <h1 className="font-serif font-medium text-base sm:text-lg text-[#EDEDE1] leading-tight">
-                {user.name}'s Vault
-              </h1>
-              <p className="font-mono text-[10px] text-[#C9A15D] uppercase tracking-wider">
-                Asset & Document Vault
-              </p>
-            </div>
-          </div>
+      {/* 3-Zone Top Bar */}
+      <header className="bg-[#16261F]/95 backdrop-blur-md border-b border-[#2A3B33] sticky top-0 z-30">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-8">
+          {/* Zone 1: Single-line Brand Wordmark */}
+          <span className="font-serif font-semibold text-lg text-[#EDEDE1] whitespace-nowrap shrink-0">
+            Asset Wallet
+          </span>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          {/* Zone 2: Clean single-line text links */}
+          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#8FA79B]">
             <button
               type="button"
-              onClick={() => setIsScanOpen(true)}
-              className="px-3 py-2 bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold text-xs rounded-xl transition-all shadow-md flex items-center gap-1.5"
+              onClick={() => {
+                setStatusFilter('all');
+                setSelectedCategory('all');
+              }}
+              className={`hover:text-[#EDEDE1] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
+                statusFilter === 'all' && selectedCategory === 'all' ? 'text-[#EDEDE1]' : ''
+              }`}
             >
-              <Sparkles size={15} />
-              <span className="hidden sm:inline">Scan Document</span>
+              All Assets
             </button>
-
+            <button
+              type="button"
+              onClick={() => setStatusFilter('warn')}
+              className={`hover:text-[#EDEDE1] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
+                statusFilter === 'warn' ? 'text-[#E4C98A]' : ''
+              }`}
+            >
+              Expiring Soon
+            </button>
             <button
               type="button"
               onClick={() => {
                 setEditingAsset(null);
                 setIsAddOpen(true);
               }}
-              className="px-3 py-2 bg-[#1C2E26] hover:bg-[#2A3B33] border border-[#2A3B33] hover:border-[#C9A15D] text-[#EDEDE1] font-medium text-xs rounded-xl transition-all flex items-center gap-1.5"
+              className="hover:text-[#EDEDE1] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
             >
-              <Plus size={15} className="text-[#C9A15D]" />
-              <span className="hidden sm:inline">Add Asset</span>
+              Add Manually
             </button>
-
             <button
               type="button"
               onClick={handleLogout}
-              className="p-2 text-[#8FA79B] hover:text-[#C97B6B] hover:bg-[#1C2E26] rounded-xl transition-colors"
-              title="Sign Out"
+              className="hover:text-[#C97B6B] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
             >
-              <LogOut size={18} />
+              Sign Out
+            </button>
+          </nav>
+
+          {/* Zone 3: 1 Primary CTA */}
+          <div className="flex items-center shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsScanOpen(true)}
+              className="px-4 py-2 bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-semibold text-xs rounded-lg transition-colors shadow-sm flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <Sparkles size={14} />
+              <span>Scan Document</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="max-w-5xl mx-auto px-4 pt-6 space-y-6">
-        {/* Expiry Warning Banner */}
+      {/* Main Workspace Container */}
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 pt-8 space-y-6">
+        {/* Personalized Vault Title & Mobile Actions */}
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-2 border-b border-[#2A3B33]">
+          <div>
+            <h1 className="font-serif text-2xl sm:text-3xl font-medium text-[#EDEDE1]">
+              {user.name}&apos;s Vault
+            </h1>
+            <p className="text-sm text-[#8FA79B] mt-1">
+              Personal asset registry, document vault, and renewal alerts
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setEditingAsset(null);
+                setIsAddOpen(true);
+              }}
+              className="px-4 py-2 bg-[#1C2E26] hover:bg-[#2A3B33] border border-[#2A3B33] hover:border-[#C9A15D] text-[#EDEDE1] font-medium text-xs rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Plus size={15} className="text-[#C9A15D]" />
+              <span>Add Asset</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="md:hidden px-3 py-2 text-xs text-[#8FA79B] hover:text-[#C97B6B] whitespace-nowrap"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+
+        {/* Urgent Expiry Warning Banner */}
         {urgentAlerts.length > 0 && (
-          <div className="bg-[#E0913F]/15 border border-[#E0913F]/40 rounded-2xl p-4 flex items-center justify-between gap-4 text-xs font-mono">
+          <div className="bg-[#E0913F]/15 border border-[#E0913F]/40 rounded-xl p-4 flex items-center justify-between gap-4 text-xs font-mono">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-xl bg-[#E0913F]/20 text-[#E0913F] shrink-0">
-                <AlertTriangle size={18} />
-              </div>
+              <AlertTriangle size={18} className="text-[#E0913F] shrink-0" />
               <div>
-                <span className="font-bold text-[#E4C98A]">
-                  {urgentAlerts.length} Asset{urgentAlerts.length > 1 ? 's' : ''} Require Attention
+                <span className="font-bold text-[#E4C98A] tabular-nums">
+                  {urgentAlerts.length} Asset{urgentAlerts.length > 1 ? 's' : ''} Require Renewal Attention
                 </span>
                 <p className="text-[#8FA79B] text-[11px] mt-0.5">
-                  Check expiring insurance policies, warranties, or documents in your vault.
+                  Review expiring insurance policies, warranties, or documents in your vault.
                 </p>
               </div>
             </div>
@@ -208,7 +258,7 @@ export const App: React.FC = () => {
             <button
               type="button"
               onClick={() => setStatusFilter('warn')}
-              className="px-3 py-1.5 bg-[#E0913F] text-[#14211B] font-bold rounded-lg shrink-0 hover:bg-[#E4C98A] transition-colors"
+              className="px-3.5 py-2 bg-[#E0913F] text-[#14211B] font-bold rounded-lg shrink-0 hover:bg-[#E4C98A] transition-colors whitespace-nowrap"
             >
               View Alerts
             </button>
@@ -230,14 +280,14 @@ export const App: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search assets by name, vendor, model, serial # or document type..."
-              className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl pl-10 pr-4 py-3 text-sm text-[#EDEDE1] placeholder-[#8FA79B]/60 focus:outline-none focus:border-[#C9A15D] focus:ring-1 focus:ring-[#C9A15D] font-mono"
+              placeholder="Search assets by name, vendor, model, serial number, or document type..."
+              className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl pl-10 pr-16 py-3 text-sm text-[#EDEDE1] placeholder-[#8FA79B]/60 focus:outline-none focus:border-[#C9A15D] focus:ring-1 focus:ring-[#C9A15D] font-mono"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[#8FA79B] hover:text-[#EDEDE1]"
+                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-[#8FA79B] hover:text-[#EDEDE1]"
               >
                 Clear
               </button>
@@ -250,45 +300,69 @@ export const App: React.FC = () => {
           />
         </div>
 
-        {/* Assets List Grouped by Category */}
+        {/* Assets List or Zero-State */}
         <div className="space-y-8">
-          {Object.keys(groupedAssets).length === 0 ? (
-            <div className="bg-[#16261F] border border-[#2A3B33] rounded-2xl p-10 text-center space-y-4 my-8">
-              <Layers size={40} className="mx-auto text-[#2A3B33]" />
-              <h3 className="text-base font-semibold text-[#EDEDE1]">No matching assets found</h3>
-              <p className="text-xs text-[#8FA79B] max-w-sm mx-auto">
-                Try clearing your search filters or scan a new document to automatically add assets to your vault.
+          {isLoadingAssets ? (
+            <div className="py-12 text-center text-[#8FA79B] font-mono text-xs">
+              Loading vault records...
+            </div>
+          ) : Object.keys(groupedAssets).length === 0 ? (
+            <div className="bg-[#16261F] border border-[#2A3B33] rounded-2xl p-10 text-center space-y-4 my-6">
+              <div className="w-14 h-14 mx-auto rounded-xl bg-[#1C2E26] border border-[#2A3B33] flex items-center justify-center text-[#C9A15D]">
+                <ShieldCheck size={28} />
+              </div>
+              <h2 className="text-xl font-serif text-[#EDEDE1] font-medium">
+                {assets.length === 0 ? 'Your Vault is Empty' : 'No Matching Assets Found'}
+              </h2>
+              <p className="text-sm text-[#8FA79B] max-w-md mx-auto leading-relaxed">
+                {assets.length === 0
+                  ? 'Upload an invoice, insurance policy, or warranty certificate to extract details automatically, or add your first asset manually.'
+                  : 'Try clearing your search or category filter to view all saved assets.'}
               </p>
-              <div className="flex justify-center gap-3 pt-2">
+
+              <div className="flex flex-col sm:flex-row justify-center gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setIsScanOpen(true)}
-                  className="px-4 py-2.5 bg-[#C9A15D] text-[#14211B] font-bold text-xs rounded-xl hover:bg-[#E4C98A] transition-colors flex items-center gap-2"
+                  className="px-5 py-2.5 bg-[#C9A15D] text-[#14211B] font-semibold text-sm rounded-lg hover:bg-[#E4C98A] transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                 >
-                  <Sparkles size={16} /> Scan Document with AI
+                  <Sparkles size={16} /> Scan Document
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setSelectedCategory('all');
-                    setStatusFilter('all');
-                  }}
-                  className="px-4 py-2.5 bg-[#1C2E26] border border-[#2A3B33] text-[#EDEDE1] font-semibold text-xs rounded-xl hover:border-[#C9A15D] transition-colors"
-                >
-                  Reset Filters
-                </button>
+                {assets.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingAsset(null);
+                      setIsAddOpen(true);
+                    }}
+                    className="px-5 py-2.5 bg-[#1C2E26] border border-[#2A3B33] text-[#EDEDE1] font-medium text-sm rounded-lg hover:border-[#C9A15D] transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
+                  >
+                    <Plus size={16} className="text-[#C9A15D]" /> Add Asset Manually
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setSelectedCategory('all');
+                      setStatusFilter('all');
+                    }}
+                    className="px-5 py-2.5 bg-[#1C2E26] border border-[#2A3B33] text-[#EDEDE1] font-medium text-sm rounded-lg hover:border-[#C9A15D] transition-colors whitespace-nowrap"
+                  >
+                    Reset Filters
+                  </button>
+                )}
               </div>
             </div>
           ) : (
             Object.entries(groupedAssets).map(([catKey, catAssets]) => (
-              <div key={catKey} className="space-y-3">
+              <section key={catKey} className="space-y-3">
                 <div className="flex items-center gap-3">
-                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-[#C9A15D]">
+                  <h2 className="font-semibold text-sm capitalize text-[#C9A15D]">
                     {catKey}
-                  </span>
-                  <span className="font-mono text-xs text-[#8FA79B]">
-                    ({catAssets.length})
+                  </h2>
+                  <span className="font-mono text-xs text-[#8FA79B] tabular-nums">
+                    {catAssets.length}
                   </span>
                   <div className="flex-1 h-px bg-[#2A3B33]" />
                 </div>
@@ -302,7 +376,7 @@ export const App: React.FC = () => {
                     />
                   ))}
                 </div>
-              </div>
+              </section>
             ))
           )}
         </div>
@@ -325,7 +399,7 @@ export const App: React.FC = () => {
       {isScanOpen && (
         <ScanModal
           onClose={() => setIsScanOpen(false)}
-          onSaveAsset={handleAddAsset}
+          onSaveAsset={handleAddOrEditAsset}
         />
       )}
 
@@ -336,7 +410,7 @@ export const App: React.FC = () => {
             setIsAddOpen(false);
             setEditingAsset(null);
           }}
-          onSave={handleAddAsset}
+          onSave={handleAddOrEditAsset}
         />
       )}
     </div>

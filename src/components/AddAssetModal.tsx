@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, Save, Paperclip, FileText, Plus } from 'lucide-react';
+import { X, Save, Paperclip, Plus, AlertCircle } from 'lucide-react';
 import { Asset, AssetCategory, DocumentType, DocumentAttachment } from '../types/asset';
+import { readDocumentFile } from '../utils/fileHelpers';
 
 interface AddAssetModalProps {
   initialAsset?: Asset | null;
@@ -32,60 +33,35 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   const [remindersText, setRemindersText] = useState(initialAsset?.reminders?.join(', ') || '');
   const [contactsText, setContactsText] = useState(initialAsset?.contacts?.join(', ') || '');
 
-  // File attachment
   const [attachment, setAttachment] = useState<DocumentAttachment | undefined>(initialAsset?.attachment);
   const [attachedFileName, setAttachedFileName] = useState<string>(initialAsset?.attachment?.filename || '');
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setFormError(null);
 
-    setAttachedFileName(file.name);
-    const reader = new FileReader();
-
-    if (file.type.startsWith('image/')) {
-      reader.onload = () => {
-        const res = reader.result as string;
-        setAttachment({
-          id: `doc-${Date.now()}`,
-          filename: file.name,
-          mimeType: file.type,
-          base64Data: res.split(',')[1] || '',
-          uploadedAt: new Date().toISOString(),
-        });
-      };
-      reader.readAsDataURL(file);
-    } else if (file.type === 'text/plain') {
-      reader.onload = () => {
-        const txt = reader.result as string;
-        setAttachment({
-          id: `doc-${Date.now()}`,
-          filename: file.name,
-          mimeType: file.type,
-          textData: txt,
-          uploadedAt: new Date().toISOString(),
-        });
-      };
-      reader.readAsText(file);
-    } else {
-      reader.onload = () => {
-        const res = reader.result as string;
-        setAttachment({
-          id: `doc-${Date.now()}`,
-          filename: file.name,
-          mimeType: file.type || 'application/pdf',
-          base64Data: res.split(',')[1] || '',
-          uploadedAt: new Date().toISOString(),
-        });
-      };
-      reader.readAsDataURL(file);
+    try {
+      const payload = await readDocumentFile(file);
+      setAttachedFileName(payload.filename);
+      setAttachment({
+        id: `doc-${Date.now()}`,
+        filename: payload.filename,
+        mimeType: payload.mimeType,
+        base64Data: payload.base64Data || undefined,
+        textData: payload.textData || undefined,
+        uploadedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      setFormError(err?.message || 'Unable to read attached document.');
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!assetName.trim()) {
-      alert('Please enter an Asset Name.');
+      setFormError('Please enter an Asset Name.');
       return;
     }
 
@@ -96,7 +72,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
     if (initialAsset) {
       onSave({
         ...initialAsset,
-        assetName,
+        assetName: assetName.trim(),
         category,
         docType,
         owner,
@@ -119,7 +95,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
       });
     } else {
       onSave({
-        assetName,
+        assetName: assetName.trim(),
         category,
         docType,
         owner,
@@ -145,16 +121,15 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md">
       <div className="bg-[#16261F] border border-[#2A3B33] rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-        {/* Header */}
         <div className="p-4 sm:p-5 bg-[#1C2E26] border-b border-[#2A3B33] flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-lg bg-[#C9A15D]/15 text-[#E4C98A] border border-[#C9A15D]/30">
               <Plus size={18} />
             </div>
             <h2 className="text-lg font-serif font-medium text-[#EDEDE1]">
-              {initialAsset ? 'Edit Asset Record' : 'Add New Asset to Vault'}
+              {initialAsset ? 'Edit Asset Record' : 'Add Asset Manually'}
             </h2>
           </div>
 
@@ -167,8 +142,14 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
           </button>
         </div>
 
-        {/* Scrollable Form */}
         <form onSubmit={handleSubmit} className="p-5 overflow-y-auto flex-1 space-y-4 text-xs">
+          {formError && (
+            <div className="p-3 rounded-lg bg-[#C97B6B]/15 border border-[#C97B6B]/40 text-[#C97B6B] flex items-center gap-2">
+              <AlertCircle size={15} className="shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
@@ -296,7 +277,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                 value={serialNumber}
                 onChange={(e) => setSerialNumber(e.target.value)}
                 placeholder="e.g. ACK-MOT-948201"
-                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono focus:border-[#C9A15D] outline-none"
+                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
               />
             </div>
 
@@ -309,7 +290,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                 value={purchasePrice}
                 onChange={(e) => setPurchasePrice(e.target.value)}
                 placeholder="e.g. ₹ 6,85,000 or $1,200"
-                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
+                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] tabular-nums focus:border-[#C9A15D] outline-none"
               />
             </div>
 
@@ -321,8 +302,8 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                 type="text"
                 value={purchaseDate}
                 onChange={(e) => setPurchaseDate(e.target.value)}
-                placeholder="15/04/2023"
-                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono focus:border-[#C9A15D] outline-none"
+                placeholder="15/04/2025"
+                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
               />
             </div>
 
@@ -335,7 +316,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                 value={expiryDate}
                 onChange={(e) => setExpiryDate(e.target.value)}
                 placeholder="14/04/2027"
-                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono focus:border-[#C9A15D] outline-none"
+                className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
               />
             </div>
 
@@ -392,29 +373,27 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             />
           </div>
 
-          {/* Document attachment */}
           <div className="pt-2 border-t border-[#2A3B33]">
             <label className="block text-[#8FA79B] font-mono text-[11px] mb-1.5">
               Attach Document / Receipt (PDF, Image, Text)
             </label>
             <label className="flex items-center gap-2 p-3 bg-[#1C2E26] border border-[#2A3B33] hover:border-[#C9A15D] rounded-xl cursor-pointer text-xs text-[#EDEDE1]">
-              <Paperclip size={16} className="text-[#C9A15D]" />
+              <Paperclip size={16} className="text-[#C9A15D] shrink-0" />
               <span className="truncate">
                 {attachedFileName ? attachedFileName : 'Choose document file...'}
               </span>
               <input
                 type="file"
-                accept="image/*,application/pdf,.docx,text/plain"
+                accept="image/*,application/pdf,.pdf,.docx,.txt,text/plain"
                 onChange={handleFileChange}
                 className="hidden"
               />
             </label>
           </div>
 
-          {/* Save submit */}
           <button
             type="submit"
-            className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-md mt-4 text-sm flex items-center justify-center gap-2"
+            className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-md mt-4 text-sm flex items-center justify-center gap-2 whitespace-nowrap"
           >
             <Save size={16} /> Save Asset to Vault
           </button>

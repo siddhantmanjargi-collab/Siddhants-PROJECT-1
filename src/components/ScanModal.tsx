@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   Upload,
@@ -7,12 +7,10 @@ import {
   CheckCircle,
   AlertCircle,
   FileText,
-  RefreshCw,
-  Eye,
-  Tag,
   ArrowRight
 } from 'lucide-react';
 import { Asset, AssetCategory, DocumentType, DocumentAttachment } from '../types/asset';
+import { readDocumentFile } from '../utils/fileHelpers';
 
 interface ScanModalProps {
   onClose: () => void;
@@ -23,7 +21,7 @@ type ScanStep = 'capture' | 'scanning' | 'review';
 
 export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) => {
   const [step, setStep] = useState<ScanStep>('capture');
-  const [file, setFile] = useState<File | null>(null);
+  const [fileSizeBytes, setFileSizeBytes] = useState<number>(0);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [base64Data, setBase64Data] = useState<string>('');
   const [textData, setTextData] = useState<string>('');
@@ -35,8 +33,9 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
   const streamRef = useRef<MediaStream | null>(null);
 
   const [scanProgress, setScanProgress] = useState(0);
-  const [scanStatusMsg, setScanStatusMsg] = useState('Initializing Gemini scanner...');
+  const [scanStatusMsg, setScanStatusMsg] = useState('Preparing document for OCR...');
   const [scanError, setScanError] = useState<string | null>(null);
+  const [inlineNotice, setInlineNotice] = useState<string | null>(null);
 
   // Extracted Data Review state
   const [extractedCategory, setExtractedCategory] = useState<AssetCategory>('vehicular');
@@ -60,54 +59,51 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
   const [categoryFields, setCategoryFields] = useState<Record<string, string>>({});
   const [rawText, setRawText] = useState('');
 
-  // Handle file select
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  useEffect(() => {
+    if (isCameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [isCameraActive]);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (!selectedFile) return;
 
-    setFile(selectedFile);
-    setFilename(selectedFile.name);
-    setMimeType(selectedFile.type || 'application/pdf');
+    setInlineNotice(null);
+    setScanError(null);
 
-    const reader = new FileReader();
-    if (selectedFile.type.startsWith('image/')) {
-      reader.onload = () => {
-        const res = reader.result as string;
-        setPreviewUrl(res);
-        setBase64Data(res.split(',')[1] || '');
-      };
-      reader.readAsDataURL(selectedFile);
-    } else if (selectedFile.type === 'text/plain') {
-      reader.onload = () => {
-        const txt = reader.result as string;
-        setTextData(txt);
-        setPreviewUrl(null);
-      };
-      reader.readAsText(selectedFile);
-    } else {
-      // PDF or DOCX
-      reader.onload = () => {
-        const res = reader.result as string;
-        setBase64Data(res.split(',')[1] || '');
-        setPreviewUrl(null);
-      };
-      reader.readAsDataURL(selectedFile);
+    try {
+      const payload = await readDocumentFile(selectedFile);
+      setFilename(payload.filename);
+      setMimeType(payload.mimeType);
+      setBase64Data(payload.base64Data);
+      setTextData(payload.textData);
+      setPreviewUrl(payload.previewUrl);
+      setFileSizeBytes(payload.sizeBytes);
+    } catch (err: any) {
+      setInlineNotice(err?.message || 'Unable to read selected file.');
     }
   };
 
-  // Live Camera
   const startCamera = async () => {
+    setInlineNotice(null);
     try {
-      setIsCameraActive(true);
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment' },
       });
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err) {
-      alert('Could not access camera. Please check camera permissions or upload a file.');
+      setIsCameraActive(true);
+    } catch {
+      setInlineNotice('Camera access unavailable. Please check permissions or upload a file directly.');
       setIsCameraActive(false);
     }
   };
@@ -120,13 +116,15 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      const rawB64 = dataUrl.split(',')[1] || '';
       setPreviewUrl(dataUrl);
-      setBase64Data(dataUrl.split(',')[1] || '');
+      setBase64Data(rawB64);
+      setTextData('');
       setMimeType('image/jpeg');
-      setFilename('Camera_Capture.jpg');
+      setFilename(`Camera_Scan_${new Date().toISOString().slice(0, 10)}.jpg`);
+      setFileSizeBytes(Math.round((rawB64.length * 3) / 4));
     }
-
     stopCamera();
   };
 
@@ -138,21 +136,21 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     setIsCameraActive(false);
   };
 
-  // Run AI Scan
   const triggerScan = async () => {
     if (!base64Data && !textData) {
-      alert('Please select a file or take a photo first.');
+      setInlineNotice('Please upload a document or capture a photo first.');
       return;
     }
 
-    setStep('scanning');
-    setScanProgress(15);
-    setScanStatusMsg('Reading document bytes & running Gemini OCR...');
+    setInlineNotice(null);
     setScanError(null);
+    setStep('scanning');
+    setScanProgress(18);
+    setScanStatusMsg('Analyzing document with Gemini Flash OCR...');
 
     const progressTimer = setInterval(() => {
-      setScanProgress((prev) => (prev < 90 ? prev + 12 : prev));
-    }, 400);
+      setScanProgress((prev) => (prev < 90 ? prev + 10 : prev));
+    }, 450);
 
     try {
       const response = await fetch('/api/scan-document', {
@@ -169,17 +167,25 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
       clearInterval(progressTimer);
       setScanProgress(100);
 
-      const resData = await response.json();
-      if (!resData.success) {
-        setScanError(resData.error || 'Failed to scan document.');
-        setScanStatusMsg('Scanning failed');
+      let resData: any = null;
+      try {
+        resData = await response.json();
+      } catch {
+        setScanError(`Server returned invalid response (HTTP ${response.status}).`);
+        setScanStatusMsg('Scanning interrupted');
+        return;
+      }
+
+      if (!response.ok || !resData?.success) {
+        setScanError(resData?.error || `Document scan failed (HTTP ${response.status}).`);
+        setScanStatusMsg('Scanning paused');
         return;
       }
 
       const d = resData.data;
       setExtractedCategory(d.category || 'vehicular');
-      setExtractedDocType(d.docType || 'Vehicle Insurance');
-      setAssetName(d.assetName || filename.replace(/\.[^/.]+$/, "") || 'Scanned Document');
+      setExtractedDocType(d.docType || 'Other Document');
+      setAssetName(d.assetName || filename.replace(/\.[^/.]+$/, '') || 'Scanned Asset');
       setOwner(d.owner || '');
       setVendor(d.vendor || '');
       setManufacturer(d.manufacturer || '');
@@ -192,12 +198,11 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
       setWarrantyEnds(d.warrantyEnds || '');
       setInvoice(d.invoice || '');
       setNotes(d.notes || '');
-      setAddOns(d.addOns || []);
-      setReminders(d.reminders || []);
-      setContacts(d.contacts || []);
+      setAddOns(Array.isArray(d.addOns) ? d.addOns : []);
+      setReminders(Array.isArray(d.reminders) ? d.reminders : []);
+      setContacts(Array.isArray(d.contacts) ? d.contacts : []);
       setRawText(d.rawText || '');
 
-      // Build extra category specific fields
       const catFields: Record<string, string> = {};
       if (d.registrationNumber) catFields.registrationNumber = d.registrationNumber;
       if (d.engineNumber) catFields.engineNumber = d.engineNumber;
@@ -212,32 +217,34 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
 
       setTimeout(() => {
         setStep('review');
-      }, 300);
+      }, 220);
     } catch (err: any) {
       clearInterval(progressTimer);
-      setScanError(err.message || 'Error communicating with AI Scanner backend.');
+      setScanError(err?.message || 'Network error while contacting the document scanner.');
+      setScanStatusMsg('Connection error');
     }
   };
 
   const handleSave = () => {
     if (!assetName.trim()) {
-      alert('Please enter an Asset Name.');
+      setInlineNotice('Please enter an Asset Name before saving.');
       return;
     }
 
-    const attachment: DocumentAttachment | undefined = (base64Data || textData)
-      ? {
-          id: `doc-${Date.now()}`,
-          filename: filename || 'Scanned_Document.pdf',
-          mimeType: mimeType || 'application/pdf',
-          base64Data,
-          textData,
-          uploadedAt: new Date().toISOString(),
-        }
-      : undefined;
+    const attachment: DocumentAttachment | undefined =
+      base64Data || textData
+        ? {
+            id: `doc-${Date.now()}`,
+            filename: filename || 'Scanned_Document.pdf',
+            mimeType: mimeType || 'application/pdf',
+            base64Data,
+            textData: rawText || textData,
+            uploadedAt: new Date().toISOString(),
+          }
+        : undefined;
 
     onSaveAsset({
-      assetName,
+      assetName: assetName.trim(),
       category: extractedCategory,
       docType: extractedDocType,
       owner,
@@ -263,20 +270,22 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md">
       <div className="bg-[#16261F] border border-[#2A3B33] rounded-2xl w-full max-w-xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-        {/* Modal Header */}
+        {/* Header */}
         <div className="p-4 sm:p-5 bg-[#1C2E26] border-b border-[#2A3B33] flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-[#C9A15D]/15 text-[#E4C98A] border border-[#C9A15D]/30">
               <Sparkles size={18} />
             </div>
             <div>
               <h2 className="text-lg font-serif font-medium text-[#EDEDE1]">
-                {step === 'review' ? 'Review AI Extracted Asset' : 'Scan Document with Gemini'}
+                {step === 'review' ? 'Review Extracted Asset' : 'Scan Document'}
               </h2>
-              <p className="text-xs text-[#8FA79B] font-mono">
-                {step === 'review' ? 'Verify details extracted by AI' : 'Instant OCR & Asset Details Extraction'}
+              <p className="text-xs text-[#8FA79B]">
+                {step === 'review'
+                  ? 'Confirm or adjust extracted details before saving'
+                  : 'Upload a file or capture a photo for automatic extraction'}
               </p>
             </div>
           </div>
@@ -293,9 +302,15 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
           </button>
         </div>
 
-        {/* Modal Content */}
+        {/* Content */}
         <div className="p-5 overflow-y-auto flex-1 space-y-5">
-          {/* STEP 1: CAPTURE / UPLOAD */}
+          {inlineNotice && (
+            <div className="p-3 rounded-lg bg-[#C97B6B]/15 border border-[#C97B6B]/40 text-xs text-[#C97B6B] flex items-center gap-2">
+              <AlertCircle size={15} className="shrink-0" />
+              <span>{inlineNotice}</span>
+            </div>
+          )}
+
           {step === 'capture' && (
             <div className="space-y-4">
               {isCameraActive ? (
@@ -304,20 +319,21 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                     ref={videoRef}
                     autoPlay
                     playsInline
+                    muted
                     className="w-full h-full object-cover"
                   />
                   <div className="absolute bottom-4 flex gap-3">
                     <button
                       type="button"
                       onClick={capturePhoto}
-                      className="px-4 py-2 bg-[#C9A15D] text-[#14211B] font-semibold text-xs rounded-lg shadow-lg flex items-center gap-1.5"
+                      className="px-4 py-2 bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-semibold text-xs rounded-lg shadow-lg flex items-center gap-1.5 whitespace-nowrap"
                     >
                       <Camera size={14} /> Capture Photo
                     </button>
                     <button
                       type="button"
                       onClick={stopCamera}
-                      className="px-4 py-2 bg-[#1C2E26] text-[#EDEDE1] text-xs rounded-lg border border-[#2A3B33]"
+                      className="px-4 py-2 bg-[#1C2E26] text-[#EDEDE1] text-xs rounded-lg border border-[#2A3B33] whitespace-nowrap"
                     >
                       Cancel
                     </button>
@@ -325,13 +341,20 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                 </div>
               ) : previewUrl ? (
                 <div className="relative rounded-xl overflow-hidden bg-[#070D0B] border border-[#2A3B33] max-h-56 flex items-center justify-center p-2">
-                  <img src={previewUrl} alt="Preview" className="max-h-48 object-contain rounded-md" />
+                  <img
+                    src={previewUrl}
+                    alt="Document preview"
+                    referrerPolicy="no-referrer"
+                    className="max-h-48 object-contain rounded-md"
+                  />
                   <button
                     type="button"
                     onClick={() => {
                       setPreviewUrl(null);
-                      setFile(null);
+                      setFilename('');
                       setBase64Data('');
+                      setTextData('');
+                      setFileSizeBytes(0);
                     }}
                     className="absolute top-2 right-2 p-1.5 rounded-full bg-[#080F0D]/80 text-[#C97B6B] hover:bg-[#080F0D]"
                   >
@@ -342,24 +365,29 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                 <label className="border-2 border-dashed border-[#2A3B33] hover:border-[#C9A15D] rounded-xl p-8 text-center flex flex-col items-center justify-center cursor-pointer transition-colors group">
                   <Upload size={32} className="text-[#8FA79B] group-hover:text-[#C9A15D] transition-colors mb-3" />
                   <span className="text-sm font-medium text-[#EDEDE1]">
-                    Click to select file or drag document here
+                    Select a document file to scan
                   </span>
                   <span className="text-xs text-[#8FA79B] mt-1 font-mono">
-                    Supports PDF, DOCX, JPEG, PNG, WEBP, TXT
+                    PDF · JPG · PNG · WEBP · DOCX · TXT
                   </span>
                   <input
                     type="file"
-                    accept="image/*,application/pdf,.docx,text/plain"
+                    accept="image/*,application/pdf,.pdf,.docx,.txt,text/plain"
                     onChange={handleFileSelect}
                     className="hidden"
                   />
                 </label>
               )}
 
-              {file && !isCameraActive && (
+              {filename && !isCameraActive && (
                 <div className="p-3 bg-[#1C2E26] border border-[#2A3B33] rounded-lg flex items-center justify-between text-xs font-mono text-[#EDEDE1]">
-                  <span className="truncate">{file.name}</span>
-                  <span className="text-[#C9A15D]">{(file.size / 1024).toFixed(1)} KB</span>
+                  <span className="flex items-center gap-2 truncate">
+                    <FileText size={14} className="text-[#C9A15D] shrink-0" />
+                    <span className="truncate">{filename}</span>
+                  </span>
+                  <span className="text-[#C9A15D] tabular-nums shrink-0 ml-2">
+                    {(fileSizeBytes / 1024).toFixed(1)} KB
+                  </span>
                 </div>
               )}
 
@@ -367,7 +395,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                 <button
                   type="button"
                   onClick={startCamera}
-                  className="py-2.5 px-3 bg-[#1C2E26] hover:bg-[#2A3B33] border border-[#2A3B33] hover:border-[#C9A15D] rounded-xl text-xs font-semibold text-[#EDEDE1] flex items-center justify-center gap-2 transition-all"
+                  className="py-2.5 px-4 bg-[#1C2E26] hover:bg-[#2A3B33] border border-[#2A3B33] hover:border-[#C9A15D] rounded-xl text-xs font-semibold text-[#EDEDE1] flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
                 >
                   <Camera size={16} className="text-[#C9A15D]" /> Use Camera
                 </button>
@@ -376,7 +404,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                   type="button"
                   onClick={triggerScan}
                   disabled={!base64Data && !textData}
-                  className="py-2.5 px-3 bg-[#C9A15D] hover:bg-[#E4C98A] disabled:opacity-40 disabled:cursor-not-allowed text-[#14211B] font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                  className="py-2.5 px-4 bg-[#C9A15D] hover:bg-[#E4C98A] disabled:opacity-40 disabled:cursor-not-allowed text-[#14211B] font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition-colors shadow-md whitespace-nowrap"
                 >
                   <Sparkles size={16} /> Scan & Extract
                 </button>
@@ -384,54 +412,61 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
             </div>
           )}
 
-          {/* STEP 2: SCANNING PROGRESS */}
           {step === 'scanning' && (
-            <div className="py-12 text-center space-y-6">
+            <div className="py-10 text-center space-y-6">
               <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
                 <div className="absolute inset-0 rounded-full border-2 border-[#C9A15D]/20 border-t-[#C9A15D] animate-spin" />
-                <Sparkles size={28} className="text-[#E4C98A] animate-pulse" />
+                <Sparkles size={28} className="text-[#E4C98A]" />
               </div>
 
               <div>
                 <h3 className="text-base font-semibold text-[#EDEDE1] mb-1">
-                  Gemini AI Analyzing Document...
+                  Extracting Asset Details
                 </h3>
                 <p className="text-xs text-[#8FA79B] font-mono">{scanStatusMsg}</p>
               </div>
 
               <div className="w-full bg-[#1C2E26] h-2 rounded-full overflow-hidden max-w-sm mx-auto">
                 <div
-                  className="bg-[#C9A15D] h-full transition-all duration-300"
-                  style={{ width: `${scanProgress}%` }}
+                  className="bg-[#C9A15D] h-full transition-transform duration-300 origin-left"
+                  style={{ transform: `scaleX(${scanProgress / 100})` }}
                 />
               </div>
 
               {scanError && (
-                <div className="p-4 bg-[#C97B6B]/15 border border-[#C97B6B]/40 rounded-xl text-xs text-[#C97B6B] text-left">
-                  <p className="font-semibold mb-1 flex items-center gap-1.5">
-                    <AlertCircle size={15} /> Error scanning document:
+                <div className="p-4 bg-[#C97B6B]/15 border border-[#C97B6B]/40 rounded-xl text-xs text-[#C97B6B] text-left space-y-2">
+                  <p className="font-semibold flex items-center gap-1.5">
+                    <AlertCircle size={15} /> Document Scan Failed
                   </p>
-                  <p>{scanError}</p>
+                  <p className="text-[#EDEDE1]/90">{scanError}</p>
                   <button
                     type="button"
-                    onClick={() => setStep('capture')}
-                    className="mt-3 px-3 py-1.5 bg-[#1C2E26] border border-[#2A3B33] text-[#EDEDE1] rounded-md font-mono text-[11px]"
+                    onClick={() => {
+                      setScanError(null);
+                      setStep('capture');
+                    }}
+                    className="px-3 py-1.5 bg-[#1C2E26] border border-[#2A3B33] hover:border-[#C9A15D] text-[#EDEDE1] rounded-lg font-mono text-[11px]"
                   >
-                    ← Try manual input or upload different document
+                    Try Another File or Photo
                   </button>
                 </div>
               )}
             </div>
           )}
 
-          {/* STEP 3: REVIEW EXTRACTED FORM */}
           {step === 'review' && (
             <div className="space-y-4 text-xs">
-              <div className="p-3 bg-[#C9A15D]/10 border border-[#C9A15D]/30 rounded-xl flex items-center justify-between text-[#E4C98A]">
+              <div className="p-3 bg-[#6FA88C]/15 border border-[#6FA88C]/35 rounded-xl flex items-center justify-between text-[#6FA88C]">
                 <span className="flex items-center gap-1.5 font-semibold">
-                  <CheckCircle size={15} /> Details Extracted Successfully
+                  <CheckCircle size={15} /> Fields Extracted Ready for Review
                 </span>
-                <span className="font-mono text-[11px] opacity-80">Verify & Save</span>
+                <button
+                  type="button"
+                  onClick={() => setStep('capture')}
+                  className="text-[#8FA79B] hover:text-[#EDEDE1] underline"
+                >
+                  Rescan
+                </button>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -505,7 +540,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                     type="text"
                     value={serialNumber}
                     onChange={(e) => setSerialNumber(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono focus:border-[#C9A15D] outline-none"
+                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
                   />
                 </div>
 
@@ -517,7 +552,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                     type="text"
                     value={purchasePrice}
                     onChange={(e) => setPurchasePrice(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
+                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] tabular-nums focus:border-[#C9A15D] outline-none"
                   />
                 </div>
 
@@ -529,7 +564,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                     type="text"
                     value={purchaseDate}
                     onChange={(e) => setPurchaseDate(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none font-mono"
+                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
                   />
                 </div>
 
@@ -541,12 +576,11 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                     type="text"
                     value={expiryDate}
                     onChange={(e) => setExpiryDate(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none font-mono"
+                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
                   />
                 </div>
               </div>
 
-              {/* Warranty Tier */}
               <div>
                 <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
                   Warranty Tier / Entitlement
@@ -559,27 +593,21 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                 />
               </div>
 
-              {/* AddOns Badges */}
               {addOns.length > 0 && (
                 <div>
                   <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Detected Add-on Covers
+                    Detected Coverage & Features
                   </label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {addOns.map((add, i) => (
-                      <span key={i} className="px-2 py-0.5 rounded bg-[#6FA88C]/15 text-[#6FA88C] border border-[#6FA88C]/30 text-[11px]">
-                        {add}
-                      </span>
-                    ))}
-                  </div>
+                  <p className="text-xs text-[#EDEDE1]">
+                    {addOns.join(' · ')}
+                  </p>
                 </div>
               )}
 
-              {/* Save Button */}
               <button
                 type="button"
                 onClick={handleSave}
-                className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-lg mt-4 text-sm flex items-center justify-center gap-2"
+                className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-lg mt-4 text-sm flex items-center justify-center gap-2 whitespace-nowrap"
               >
                 Save to Asset Vault <ArrowRight size={16} />
               </button>

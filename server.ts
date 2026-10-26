@@ -1,21 +1,53 @@
 import express, { Request, Response } from 'express';
+import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load local .env file if present without overriding existing environment variables
+function loadLocalEnv() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (key && !process.env[key]) {
+        process.env[key] = val;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not read .env file:', err);
+  }
+}
+
+loadLocalEnv();
+
 const app = express();
 const PORT = 3000;
 
-// Body size limit (max 25MB for scans)
+// Body size limit (max 25MB for document scans)
 app.use(express.json({ limit: '25mb' }));
 
 // Sliding window rate-limiter
 const rateLimitMap = new Map<string, { count: number; startTime: number }>();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const MAX_REQUESTS_PER_WINDOW = 15;
+const MAX_REQUESTS_PER_WINDOW = 20;
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
@@ -30,11 +62,89 @@ function checkRateLimit(ip: string): boolean {
   return record.count <= MAX_REQUESTS_PER_WINDOW;
 }
 
-const ALLOWED_MIME_TYPES = new Set([
-  'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic',
-  'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'text/plain'
+const GEMINI_INLINE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+  'application/pdf',
 ]);
+
+function normalizeMimeType(rawMime?: string, filename?: string): string {
+  const lowerMime = (rawMime || '').trim().toLowerCase();
+  const ext = path.extname(filename || '').toLowerCase();
+
+  if (lowerMime === 'image/jpg' || ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (lowerMime === 'image/png' || ext === '.png') return 'image/png';
+  if (lowerMime === 'image/webp' || ext === '.webp') return 'image/webp';
+  if (lowerMime === 'image/heic' || ext === '.heic') return 'image/heic';
+  if (lowerMime === 'image/heif' || ext === '.heif') return 'image/heif';
+  if (lowerMime === 'application/pdf' || ext === '.pdf') return 'application/pdf';
+  if (
+    lowerMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    ext === '.docx'
+  ) {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+  if (lowerMime.startsWith('text/') || ext === '.txt' || ext === '.csv') return 'text/plain';
+
+  return lowerMime;
+}
+
+// Extract plain text from a .docx (ZIP containing word/document.xml) using Node built-in zlib
+function extractDocxText(base64Str: string): string {
+  try {
+    const buf = Buffer.from(base64Str, 'base64');
+    let offset = 0;
+    const chunks: string[] = [];
+
+    while (offset + 30 <= buf.length) {
+      const sig = buf.readUInt32LE(offset);
+      if (sig !== 0x04034b50) {
+        offset += 1;
+        continue;
+      }
+      const compression = buf.readUInt16LE(offset + 8);
+      const compSize = buf.readUInt32LE(offset + 18);
+      const nameLen = buf.readUInt16LE(offset + 26);
+      const extraLen = buf.readUInt16LE(offset + 28);
+      const entryName = buf.subarray(offset + 30, offset + 30 + nameLen).toString('utf-8');
+      const dataStart = offset + 30 + nameLen + extraLen;
+      const dataEnd = dataStart + compSize;
+
+      if (entryName === 'word/document.xml' && dataEnd <= buf.length && compSize > 0) {
+        const rawEntry = buf.subarray(dataStart, dataEnd);
+        const xmlBuf = compression === 8 ? zlib.inflateRawSync(rawEntry) : rawEntry;
+        const xml = xmlBuf.toString('utf-8');
+        const cleaned = xml
+          .replace(/<\/w:p>/g, '\n')
+          .replace(/<w:tab\/>/g, '\t')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+\n/g, '\n')
+          .replace(/[ \t]{2,}/g, ' ')
+          .trim();
+        chunks.push(cleaned);
+        break;
+      }
+
+      offset = dataEnd > offset ? dataEnd : offset + 30;
+    }
+
+    return chunks.join('\n').trim();
+  } catch (err) {
+    console.warn('DOCX text extraction warning:', err);
+    return '';
+  }
+}
+
+function stripJsonCodeFences(raw: string): string {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  }
+  return cleaned.trim();
+}
 
 function cleanCode(val: any): string {
   if (!val || typeof val !== 'string') return '';
@@ -50,6 +160,22 @@ function cleanCode(val: any): string {
   return trimmed;
 }
 
+function resolveServerGeminiKey(): string {
+  const candidates = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_ASSET_WALLET,
+    process.env.GEMINI_API_KEY_ASSET_WALLET_2,
+    process.env.API_KEY,
+  ];
+  for (const c of candidates) {
+    if (c && c.trim()) return c.trim();
+  }
+  const dynamicKey = Object.keys(process.env).find(
+    (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]?.trim()
+  );
+  return dynamicKey ? process.env[dynamicKey]!.trim() : '';
+}
+
 app.post('/api/scan-document', async (req: Request, res: Response) => {
   const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
 
@@ -61,171 +187,99 @@ app.post('/api/scan-document', async (req: Request, res: Response) => {
   }
 
   try {
-    let apiKey = (req.headers['x-gemini-key'] as string) || req.body?.userApiKey || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
+    const apiKey = resolveServerGeminiKey();
     if (!apiKey) {
-      const foundKeyName = Object.keys(process.env).find(
-        (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]
-      );
-      if (foundKeyName) {
-        apiKey = process.env[foundKeyName];
-      }
-    }
-
-    if (!apiKey) {
-      return res.status(200).json({
+      return res.status(500).json({
         success: false,
-        error: 'No Gemini API key found in environment variables. Please provide one or set GEMINI_API_KEY.',
+        error: 'Gemini API key is not configured on the server environment.',
       });
     }
 
-    const { mimeType, base64Data, textData, filename } = req.body;
+    const { mimeType, base64Data, textData, filename } = req.body || {};
 
     if (!base64Data && !textData) {
-      return res.status(400).json({ success: false, error: 'No document data provided' });
+      return res.status(400).json({ success: false, error: 'No document data provided.' });
     }
 
-    if (mimeType && !ALLOWED_MIME_TYPES.has(mimeType.toLowerCase())) {
-      return res.status(400).json({
-        success: false,
-        error: `Unsupported file type: ${mimeType}. Please upload PDF, Word document, or image files.`,
-      });
-    }
+    const cleanBase64 =
+      typeof base64Data === 'string' && base64Data.includes(',')
+        ? base64Data.split(',').pop()!.trim()
+        : typeof base64Data === 'string'
+        ? base64Data.trim()
+        : '';
 
-    if (base64Data && base64Data.length > 28 * 1024 * 1024) {
+    if (cleanBase64 && cleanBase64.length > 28 * 1024 * 1024) {
       return res.status(400).json({
         success: false,
         error: 'File payload is too large. Maximum supported size is 15MB.',
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const normMime = normalizeMimeType(mimeType, filename);
+    let extractedText = typeof textData === 'string' ? textData.trim() : '';
 
     const parts: any[] = [];
-    if (base64Data && mimeType) {
-      let normMime = mimeType.toLowerCase();
-      if (normMime === 'image/jpg') normMime = 'image/jpeg';
-      parts.push({
-        inlineData: {
-          mimeType: normMime === 'application/pdf' ? 'application/pdf' : normMime,
-          data: base64Data,
-        },
+
+    if (normMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      if (!extractedText && cleanBase64) {
+        extractedText = extractDocxText(cleanBase64);
+      }
+      if (!extractedText) {
+        return res.status(400).json({
+          success: false,
+          error: 'Could not extract readable text from Word (.docx) file. Please upload a PDF or image instead.',
+        });
+      }
+    } else if (normMime === 'text/plain') {
+      if (!extractedText && cleanBase64) {
+        extractedText = Buffer.from(cleanBase64, 'base64').toString('utf-8');
+      }
+    } else if (GEMINI_INLINE_MIME_TYPES.has(normMime)) {
+      if (cleanBase64) {
+        parts.push({
+          inlineData: {
+            mimeType: normMime,
+            data: cleanBase64,
+          },
+        });
+      }
+    } else if (!extractedText) {
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported file type (${normMime || 'unknown'}). Please upload a PDF, JPG, PNG, WEBP, DOCX, or TXT document.`,
       });
     }
 
-    const prompt = `You are an expert OCR document scanner and asset detail extraction engine for a personal Asset Wallet app.
-Thoroughly analyze this document (${filename || 'uploaded document'}) across all pages and extract ALL key details with high precision.
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
 
-STEP 1: ASSET CATEGORY IDENTIFICATION
-Detect the exact asset category from:
-- "vehicular": Cars, Motorcycles, Two-wheelers, Commercial Vehicles, Motor Insurance, RC, PUC
-- "electronics": Laptops, Smartphones, Computers, Audio, TVs, Gadgets, Tech accessories
-- "camera": DSLR, Mirrorless Cameras, Lenses, Camcorders, Optical equipment
-- "watch": Watches, Luxury Watches, Smartwatches, Timepieces
-- "appliances": Refrigerators, ACs, Washing Machines, Kitchen Appliances
-- "health": Health & Medical Insurance, Hospitalization Cards, Diagnostic Records
-- "identity": Passports, Driver Licenses, Aadhaar Cards, PAN Cards, Government IDs
-- "property": Title Deeds, Sale Agreements, Property Tax Receipts, Lease Agreements
-- "finance": Bank Statements, Fixed Deposits, Mutual Funds, Investment Certificates
-- "furniture": Sofas, Tables, Chairs, Home/Office Furniture
-- "jewellery": Gold, Silver, Diamond, Certified Jewellery
-- "machinery": Industrial Equipment, Generators, Motors, Tools
-- "subscriptions": Software, Memberships, Subscriptions
-- "other": General assets or uncategorized documents
-
-STEP 2: DOCUMENT TYPE CLASSIFICATION
-Identify document type from:
-- "Vehicle Insurance"
-- "Vehicle Registration Certificate (RC)"
-- "Invoice"
-- "Receipt"
-- "Warranty Certificate"
-- "Extended Warranty"
-- "Service Record"
-- "User Manual"
-- "Property Document"
-- "Health Insurance"
-- "Bank / Investment Statement"
-- "Subscription / Membership"
-- "Other Document"
-
-STEP 3: EXTRACT ALL VISIBLE FIELDS
-Extract ALL facts visible in the text/document without hallucinating (use empty string "" if not present):
-- assetName: Clear descriptive asset title (e.g. "Dell XPS 15 9530 Laptop", "Maruti Suzuki Celerio ZXI", "Sony Alpha A7 IV Camera", "Acko Motor Policy")
-- owner: Full name of policyholder, buyer, account holder, or registered owner
-- vendor: Seller, Dealer, Merchant, Insurer, Bank, or Service Provider
-- manufacturer: Brand or Maker (e.g. Dell, Apple, Maruti Suzuki, Sony, Samsung, LG, Rolex)
-- model: Model name or number (e.g. Celerio ZXI, XPS 15 9530, iPhone 15 Pro, Alpha A7 IV)
-- purchasePrice: Price, cost, premium, or total amount paid with currency symbol if present
-- purchaseDate: Date of purchase, issue date, start date (Formatted DD/MM/YYYY)
-- expiryDate: Policy expiry date, validity end date, warranty expiration date, or maturity date (Formatted DD/MM/YYYY)
-- renewalDate: Due date for renewal or next payment (Formatted DD/MM/YYYY)
-- warrantyType: Exact warranty entitlement or tier name (e.g. "Dell Premium Support Plus", "Onsite Service", "AppleCare+", "2 Years Extended Warranty")
-- warrantyStartDate: Warranty/Support start or commencement date (Formatted DD/MM/YYYY)
-- warrantyEnds: Warranty/Support end or expiry date (Formatted DD/MM/YYYY)
-- serialNumber: Serial Number, Policy Number, Account/Folio Number, Service Tag, Asset ID, or Registration reference
-- assetId: Asset Tag Number, System ID, or Hardware Inventory ID (e.g. AST-LAP-9530, DELL-XPS-001)
-- expressServiceCode: Dell or hardware Express Service Code (numeric code, e.g. 29381920391)
-- serviceTag: Dell Service Tag, Hardware Serial Number, or Asset Tag (e.g. DX9530A1)
-- supportPhone: Support, Helpline, or Emergency Phone Number (e.g. 1800-425-4026, +1-800-624-9896)
-- supportEmail: Customer Support or Helpline Email (e.g. support@dell.com, customercare@apple.com)
-- coverageDetails: Coverage scope, terms, or entitlements (e.g. "Onsite Service, Accidental Damage, Hardware & Software Support")
-- invoice: Invoice or Bill number
-- verificationUrl: QR verification link, URL, or website if shown
-- notes: Important terms, conditions, or key highlights
-- addOns: Array of strings for features or add-on covers (e.g. ["Zero Depreciation", "Accidental Damage Protection"])
-- reminders: Array of strings for key due dates or action items
-- contacts: Array of strings for helpline phone numbers, support emails, emergency numbers
-
-Category Specific Fields:
-- registrationNumber: Vehicle registration number / license plate (e.g. KA01MM4354)
-- engineNumber: Engine number
-- chassisNumber: Chassis or VIN number
-- policyType: Comprehensive, Third Party, Own Damage
-- coverageType: Coverage details (e.g. OD + TP)
-- idv: Insured Declared Value or Sum Insured
-- ncbPercentage: NCB percentage (e.g. 50%)
-- vehicleType: Private Car, Two Wheeler, Commercial Vehicle
-- fuelType: Petrol, Diesel, EV, CNG
-- cubicCapacity: Engine cubic capacity (e.g. 998 CC)
-- registrationYear: Registration year
-- storageOrSpecs: RAM, SSD, Processor, Specs
-- imeiOrMac: IMEI or MAC address
-- lensDetails: Lens specifications / Sensor details
-- watchMovement: Watch movement or material
-- propertyAddress: Property location address
-- deedNumber: Deed or agreement number
-- builtUpArea: Area in sq ft
-- institutionName: Bank or AMC name
-- accountOrFolioNumber: Account or Folio number
-- applianceType: Refrigerator, AC, Washing Machine, etc.
-- capacity: Capacity or Tonnage
-- energyRating: Star rating
-- material: Furniture or item material
-- jewelleryType: Item type (Gold Chain, Diamond Ring)
-- metalPurity: Metal purity (22K Gold, 925 Silver)
-- grossWeightGrams: Weight in grams
-- subscriptionPlan: Subscription plan name
-- billingCycle: Monthly / Annual
-
-Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
+    const prompt = `Extract all visible asset and document details from "${filename || 'document'}" into JSON (use "" if not visible, never guess).
+1. category: one of "vehicular","electronics","camera","watch","appliances","health","identity","property","finance","furniture","jewellery","machinery","subscriptions","other"
+2. docType: one of "Vehicle Insurance","Vehicle Registration Certificate (RC)","Invoice","Receipt","Warranty Certificate","Extended Warranty","Service Record","User Manual","Property Document","Health Insurance","Bank / Investment Statement","Subscription / Membership","Other Document"
+3. Core fields (dates strictly DD/MM/YYYY): assetName, owner, vendor, manufacturer, model, purchasePrice (include currency), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber (serial/policy/folio/tag), assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes, addOns (string[]), reminders (string[]), contacts (string[]), rawText (concise key OCR lines, max 600 chars).
+4. Category fields if visible: registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
 
     let textContent = prompt;
-    if (textData) {
-      textContent += `\n\n--- PRE-EXTRACTED DOCUMENT TEXT ---\n${textData}`;
+    if (extractedText) {
+      textContent += `\n\n--- EXTRACTED DOCUMENT TEXT ---\n${extractedText.slice(0, 18000)}`;
     }
     parts.push({ text: textContent });
 
-    const candidateModels = [
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-2.5-pro',
-      'gemini-1.5-pro'
-    ];
-    let response: any = null;
+    // Primary: Gemini Flash 3.8 -> Automatic Failover: Gemini Flash 3.6
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.6-flash'];
+
+    let responseText = '';
+    let usedModel = '';
     let lastError: any = null;
 
     const schemaConfig = {
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
@@ -257,7 +311,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           addOns: { type: Type.ARRAY, items: { type: Type.STRING } },
           reminders: { type: Type.ARRAY, items: { type: Type.STRING } },
           contacts: { type: Type.ARRAY, items: { type: Type.STRING } },
-
           registrationNumber: { type: Type.STRING },
           engineNumber: { type: Type.STRING },
           chassisNumber: { type: Type.STRING },
@@ -269,29 +322,22 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           coverageType: { type: Type.STRING },
           idv: { type: Type.STRING },
           ncbPercentage: { type: Type.STRING },
-
           storageOrSpecs: { type: Type.STRING },
           imeiOrMac: { type: Type.STRING },
           lensDetails: { type: Type.STRING },
           watchMovement: { type: Type.STRING },
-
           propertyAddress: { type: Type.STRING },
           deedNumber: { type: Type.STRING },
           builtUpArea: { type: Type.STRING },
-
           institutionName: { type: Type.STRING },
           accountOrFolioNumber: { type: Type.STRING },
-
           applianceType: { type: Type.STRING },
           capacity: { type: Type.STRING },
           energyRating: { type: Type.STRING },
-
           material: { type: Type.STRING },
-
           jewelleryType: { type: Type.STRING },
           metalPurity: { type: Type.STRING },
           grossWeightGrams: { type: Type.STRING },
-
           subscriptionPlan: { type: Type.STRING },
           billingCycle: { type: Type.STRING },
           rawText: { type: Type.STRING },
@@ -302,54 +348,86 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
 
     for (const modelName of candidateModels) {
       try {
-        response = await ai.models.generateContent({
+        const resObj = await ai.models.generateContent({
           model: modelName,
-          contents: parts,
-          config: schemaConfig as any,
+          contents: { parts },
+          config: schemaConfig,
         });
-        if (response && response.text) break;
-      } catch (modelErr: any) {
-        lastError = modelErr;
-        try {
-          response = await ai.models.generateContent({
-            model: modelName,
-            contents: parts,
-            config: { responseMimeType: 'application/json' },
-          });
-          if (response && response.text) break;
-        } catch (jsonErr) {
-          lastError = jsonErr;
+        if (resObj && resObj.text) {
+          responseText = resObj.text;
+          usedModel = modelName;
+          break;
+        }
+      } catch (schemaErr: any) {
+        const errMsg = String(schemaErr?.message || schemaErr || '');
+        console.warn(`[Scanner] ${modelName} primary attempt failed:`, errMsg);
+        lastError = schemaErr;
+
+        // Only retry the same model in plain JSON mode if it failed due to schema/400 validation,
+        // NOT on 404/429/503/network errors (which should shift immediately to gemini-3.6-flash)
+        const isSchemaRejection =
+          (errMsg.includes('400') || errMsg.toLowerCase().includes('schema')) &&
+          !errMsg.includes('404') &&
+          !errMsg.includes('429') &&
+          !errMsg.includes('503');
+
+        if (isSchemaRejection) {
+          try {
+            const fallbackRes = await ai.models.generateContent({
+              model: modelName,
+              contents: { parts },
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                responseMimeType: 'application/json',
+              },
+            });
+            if (fallbackRes && fallbackRes.text) {
+              responseText = fallbackRes.text;
+              usedModel = modelName;
+              break;
+            }
+          } catch (jsonErr: any) {
+            console.warn(`[Scanner] ${modelName} JSON mode failed, shifting to next candidate:`, jsonErr?.message || jsonErr);
+            lastError = jsonErr;
+          }
         }
       }
     }
 
-    if (!response || !response.text) {
+    if (!responseText) {
       const rawErr = lastError?.message || '';
       let userFriendlyErr = rawErr;
       if (rawErr.includes('429') || rawErr.includes('RESOURCE_EXHAUSTED') || rawErr.includes('Quota exceeded')) {
-        userFriendlyErr = 'Google Gemini API Free Tier Quota Exceeded (429: RESOURCE_EXHAUSTED).';
+        userFriendlyErr = 'Gemini API rate limit reached (429: RESOURCE_EXHAUSTED). Please wait a moment and try scanning again.';
       } else {
-        userFriendlyErr = `Gemini API scanner error: ${rawErr || 'All model candidates failed'}.`;
+        userFriendlyErr = `Document scan error: ${rawErr || 'Both gemini-3.8-flash and gemini-3.6-flash failed to process this document.'}`;
       }
-      return res.status(200).json({
+      return res.status(502).json({
         success: false,
         error: userFriendlyErr,
       });
     }
 
     let data: any = {};
-    if (response && response.text) {
-      try {
-        data = JSON.parse(response.text);
-      } catch (parseErr) {
-        console.warn('Failed to parse Gemini JSON output:', parseErr);
-      }
+    try {
+      data = JSON.parse(stripJsonCodeFences(responseText));
+    } catch (parseErr) {
+      console.warn('Failed to parse Gemini JSON output:', parseErr);
+      return res.status(502).json({
+        success: false,
+        error: 'Received malformed JSON from document scanner. Please try scanning a clearer image or PDF.',
+      });
     }
 
     function cleanVal(v: any): string {
       if (!v || typeof v !== 'string') return '';
       const s = v.trim();
-      if (s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'n/a' || s.toLowerCase() === 'none') {
+      if (
+        s.toLowerCase() === 'null' ||
+        s.toLowerCase() === 'undefined' ||
+        s.toLowerCase() === 'n/a' ||
+        s.toLowerCase() === 'none'
+      ) {
         return '';
       }
       return s;
@@ -387,29 +465,34 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       if (d.includes('service') || d.includes('maintenance')) return 'Service Record';
       if (d.includes('manual')) return 'User Manual';
       if (d.includes('property') || d.includes('deed')) return 'Property Document';
-      if (d.includes('subscription') || d.includes('membership')) return 'Membership / Subscription';
+      if (d.includes('subscription') || d.includes('membership')) return 'Subscription / Membership';
       if (d.includes('bank') || d.includes('statement')) return 'Bank / Investment Statement';
-      return dt.trim();
+      return 'Other Document';
     }
 
     const mappedCategory = mapToAppCategory(data.category);
     const mappedDocType = mapToAppDocType(data.docType);
 
-    const contactsArr = Array.isArray(data.contacts) ? data.contacts.map(cleanVal).filter(Boolean) : (data.contacts ? [cleanVal(data.contacts)] : []);
+    const contactsArr = Array.isArray(data.contacts)
+      ? data.contacts.map(cleanVal).filter(Boolean)
+      : data.contacts
+      ? [cleanVal(data.contacts)]
+      : [];
     const phoneVal = cleanVal(data.supportPhone);
-    if (phoneVal && !contactsArr.some(c => c.includes(phoneVal))) {
+    if (phoneVal && !contactsArr.some((c: string) => c.includes(phoneVal))) {
       contactsArr.push(`Support Phone: ${phoneVal}`);
     }
     const emailVal = cleanVal(data.supportEmail);
-    if (emailVal && !contactsArr.some(c => c.includes(emailVal))) {
+    if (emailVal && !contactsArr.some((c: string) => c.includes(emailVal))) {
       contactsArr.push(`Support Email: ${emailVal}`);
     }
 
     const sanitizedData = {
       success: true,
+      modelUsed: usedModel,
       category: mappedCategory,
       docType: mappedDocType,
-      assetName: cleanVal(data.assetName) || filename || 'Scanned Asset',
+      assetName: cleanVal(data.assetName) || (filename ? filename.replace(/\.[^/.]+$/, '') : 'Scanned Asset'),
       owner: cleanVal(data.owner),
       vendor: cleanVal(data.vendor),
       manufacturer: cleanVal(data.manufacturer),
@@ -426,8 +509,8 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       invoice: cleanCode(data.invoice),
       verificationUrl: cleanVal(data.verificationUrl),
       notes: cleanVal(data.notes),
-      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : (data.addOns ? [cleanVal(data.addOns)] : []),
-      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : (data.reminders ? [cleanVal(data.reminders)] : []),
+      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : data.addOns ? [cleanVal(data.addOns)] : [],
+      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : data.reminders ? [cleanVal(data.reminders)] : [],
       contacts: contactsArr,
 
       registrationNumber: cleanCode(data.registrationNumber),
@@ -473,7 +556,7 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       subscriptionPlan: cleanVal(data.subscriptionPlan),
       billingCycle: cleanVal(data.billingCycle),
 
-      rawText: cleanVal(data.rawText) || textData || '',
+      rawText: cleanVal(data.rawText) || extractedText || '',
 
       documentClassification: { docType: mappedDocType, confidence: 0.98 },
       assetCategory: { category: mappedCategory, confidence: 0.98 },
@@ -484,11 +567,11 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       success: true,
       data: sanitizedData,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error('Scan API handler exception:', err);
-    return res.status(200).json({
+    return res.status(500).json({
       success: false,
-      error: 'AI document scanning service was unable to complete. Please check the document or enter details manually.',
+      error: err?.message || 'Document scanning service encountered an unexpected error.',
     });
   }
 });
