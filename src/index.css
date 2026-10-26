@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg: #0F1C1A;
+    --surface: #16261F;
+    --surface-raised: #1C2E26;
+    --hairline: #2A3B33;
+    --brass: #C9A15D;
+    --brass-bright: #E4C98A;
+    --text: #EDEDE1;
+    --text-muted: #8FA79B;
+    --success: #6FA88C;
+    --error: #C97B6B;
+    --warn-color: #E0913F;
+    --font-display: 'Cinzel', ui-serif, Georgia, serif;
+    --font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', "SF Mono", monospace;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    background-image: radial-gradient(circle at 50% -10%, rgba(201,161,93,0.08), transparent 55%);
+    background-attachment: fixed;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--brass);
+}
+
+@keyframes sweep {
+  0%, 100% { transform: translateY(0); opacity: 0.4; }
+  50% { transform: translateY(34px); opacity: 1; }
+}
+
+.animate-sweep {
+  animation: sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes otpPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.18); border-color: var(--brass); box-shadow: 0 0 0 4px rgba(201,161,93,0.2); }
+  100% { transform: scale(1); }
+}
+
+.animate-otp-pop {
+  animation: otpPop 0.3s cubic-bezier(.34,1.56,.64,1);
+}

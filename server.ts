@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -9,16 +9,15 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-// GUARDRAIL 1: Body size limit (max 25MB to prevent memory exhaustion / DoS)
+// Body size limit (max 25MB for scans)
 app.use(express.json({ limit: '25mb' }));
-app.use(express.static(__dirname));
 
-// GUARDRAIL 2: Simple sliding window rate-limiter for AI document scanning
-const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+// Sliding window rate-limiter
+const rateLimitMap = new Map<string, { count: number; startTime: number }>();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 15;
 
-function checkRateLimit(ip) {
+function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const record = rateLimitMap.get(ip) || { count: 0, startTime: now };
   if (now - record.startTime > RATE_LIMIT_WINDOW_MS) {
@@ -31,14 +30,13 @@ function checkRateLimit(ip) {
   return record.count <= MAX_REQUESTS_PER_WINDOW;
 }
 
-// GUARDRAIL 3: Allowed mime-type whitelist for document scanning
 const ALLOWED_MIME_TYPES = new Set([
   'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic',
   'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/plain'
 ]);
 
-function cleanCode(val) {
+function cleanCode(val: any): string {
   if (!val || typeof val !== 'string') return '';
   const trimmed = val.trim();
   const upper = trimmed.toUpperCase();
@@ -52,10 +50,9 @@ function cleanCode(val) {
   return trimmed;
 }
 
-app.post('/api/scan-document', async (req, res) => {
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+app.post('/api/scan-document', async (req: Request, res: Response) => {
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
 
-  // Check rate limit
   if (!checkRateLimit(clientIp)) {
     return res.status(429).json({
       success: false,
@@ -64,27 +61,25 @@ app.post('/api/scan-document', async (req, res) => {
   }
 
   try {
-    let apiKey = req.headers['x-gemini-key'] || req.body?.userApiKey || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
+    let apiKey = (req.headers['x-gemini-key'] as string) || req.body?.userApiKey || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_ASSET_WALLET_2 || process.env.GEMINI_API_KEY_ASSET_WALLET;
     if (!apiKey) {
       const foundKeyName = Object.keys(process.env).find(
         (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]
       );
       if (foundKeyName) {
         apiKey = process.env[foundKeyName];
-        console.log(`Using Gemini API key from environment variable: ${foundKeyName}`);
       }
     }
 
     if (!apiKey) {
       return res.status(200).json({
         success: false,
-        error: 'No Gemini API key found in environment variables (e.g. GEMINI_API_KEY or similar).',
+        error: 'No Gemini API key found in environment variables. Please provide one or set GEMINI_API_KEY.',
       });
     }
 
     const { mimeType, base64Data, textData, filename } = req.body;
 
-    // GUARDRAIL 4: Input verification
     if (!base64Data && !textData) {
       return res.status(400).json({ success: false, error: 'No document data provided' });
     }
@@ -96,7 +91,6 @@ app.post('/api/scan-document', async (req, res) => {
       });
     }
 
-    // GUARDRAIL 5: Base64 size check (max ~20MB base64)
     if (base64Data && base64Data.length > 28 * 1024 * 1024) {
       return res.status(400).json({
         success: false,
@@ -106,7 +100,7 @@ app.post('/api/scan-document', async (req, res) => {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const parts = [];
+    const parts: any[] = [];
     if (base64Data && mimeType) {
       let normMime = mimeType.toLowerCase();
       if (normMime === 'image/jpg') normMime = 'image/jpeg';
@@ -228,8 +222,8 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       'gemini-2.5-pro',
       'gemini-1.5-pro'
     ];
-    let response = null;
-    let lastError = null;
+    let response: any = null;
+    let lastError: any = null;
 
     const schemaConfig = {
       responseMimeType: 'application/json',
@@ -264,7 +258,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           reminders: { type: Type.ARRAY, items: { type: Type.STRING } },
           contacts: { type: Type.ARRAY, items: { type: Type.STRING } },
 
-          // Vehicular
           registrationNumber: { type: Type.STRING },
           engineNumber: { type: Type.STRING },
           chassisNumber: { type: Type.STRING },
@@ -277,35 +270,28 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           idv: { type: Type.STRING },
           ncbPercentage: { type: Type.STRING },
 
-          // Electronics & Laptop / Camera / Watch
           storageOrSpecs: { type: Type.STRING },
           imeiOrMac: { type: Type.STRING },
           lensDetails: { type: Type.STRING },
           watchMovement: { type: Type.STRING },
 
-          // Property
           propertyAddress: { type: Type.STRING },
           deedNumber: { type: Type.STRING },
           builtUpArea: { type: Type.STRING },
 
-          // Finance
           institutionName: { type: Type.STRING },
           accountOrFolioNumber: { type: Type.STRING },
 
-          // Appliances
           applianceType: { type: Type.STRING },
           capacity: { type: Type.STRING },
           energyRating: { type: Type.STRING },
 
-          // Furniture
           material: { type: Type.STRING },
 
-          // Jewellery
           jewelleryType: { type: Type.STRING },
           metalPurity: { type: Type.STRING },
           grossWeightGrams: { type: Type.STRING },
 
-          // Subscriptions
           subscriptionPlan: { type: Type.STRING },
           billingCycle: { type: Type.STRING },
           rawText: { type: Type.STRING },
@@ -319,15 +305,11 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
         response = await ai.models.generateContent({
           model: modelName,
           contents: parts,
-          config: schemaConfig,
+          config: schemaConfig as any,
         });
         if (response && response.text) break;
-      } catch (modelErr) {
-        const errMsg = modelErr?.message || String(modelErr);
-        console.warn(`Model ${modelName} with schema failed:`, errMsg);
+      } catch (modelErr: any) {
         lastError = modelErr;
-
-        // Fallback retry with JSON mode without schema
         try {
           response = await ai.models.generateContent({
             model: modelName,
@@ -336,8 +318,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
           });
           if (response && response.text) break;
         } catch (jsonErr) {
-          const jsonErrMsg = jsonErr?.message || String(jsonErr);
-          console.warn(`Model ${modelName} JSON mode failed:`, jsonErrMsg);
           lastError = jsonErr;
         }
       }
@@ -347,18 +327,17 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       const rawErr = lastError?.message || '';
       let userFriendlyErr = rawErr;
       if (rawErr.includes('429') || rawErr.includes('RESOURCE_EXHAUSTED') || rawErr.includes('Quota exceeded')) {
-        userFriendlyErr = 'Google Gemini API Free Tier Quota Exceeded (429: RESOURCE_EXHAUSTED). Your Gemini API key has hit its daily/per-minute request limit.';
+        userFriendlyErr = 'Google Gemini API Free Tier Quota Exceeded (429: RESOURCE_EXHAUSTED).';
       } else {
         userFriendlyErr = `Gemini API scanner error: ${rawErr || 'All model candidates failed'}.`;
       }
-      console.warn('Gemini scan failed:', userFriendlyErr);
       return res.status(200).json({
         success: false,
         error: userFriendlyErr,
       });
     }
 
-    let data = {};
+    let data: any = {};
     if (response && response.text) {
       try {
         data = JSON.parse(response.text);
@@ -367,7 +346,7 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       }
     }
 
-    function cleanVal(v) {
+    function cleanVal(v: any): string {
       if (!v || typeof v !== 'string') return '';
       const s = v.trim();
       if (s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'n/a' || s.toLowerCase() === 'none') {
@@ -376,7 +355,7 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       return s;
     }
 
-    function mapToAppCategory(cat) {
+    function mapToAppCategory(cat: string): string {
       if (!cat || typeof cat !== 'string') return 'other';
       const c = cat.trim().toLowerCase();
       if (c.includes('vehicle') || c.includes('car') || c.includes('bike') || c.includes('auto') || c.includes('vehicular') || c.includes('motor')) return 'vehicular';
@@ -395,7 +374,7 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       return 'other';
     }
 
-    function mapToAppDocType(dt) {
+    function mapToAppDocType(dt: string): string {
       if (!dt || typeof dt !== 'string') return 'Other Document';
       const d = dt.trim().toLowerCase();
       if (d.includes('rc') || d.includes('registration certificate')) return 'Vehicle Registration Certificate (RC)';
@@ -451,7 +430,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : (data.reminders ? [cleanVal(data.reminders)] : []),
       contacts: contactsArr,
 
-      // Vehicular
       registrationNumber: cleanCode(data.registrationNumber),
       engineNumber: cleanCode(data.engineNumber),
       chassisNumber: cleanCode(data.chassisNumber),
@@ -464,7 +442,6 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       idv: cleanVal(data.idv),
       ncbPercentage: cleanVal(data.ncbPercentage),
 
-      // Electronics & Laptop / Camera / Watch / Hardware
       serviceTag: cleanCode(data.serviceTag || data.serialNumber),
       expressServiceCode: cleanCode(data.expressServiceCode),
       assetId: cleanCode(data.assetId),
@@ -476,35 +453,28 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
       lensDetails: cleanVal(data.lensDetails),
       watchMovement: cleanVal(data.watchMovement),
 
-      // Property
       propertyAddress: cleanVal(data.propertyAddress),
       deedNumber: cleanCode(data.deedNumber),
       builtUpArea: cleanVal(data.builtUpArea),
 
-      // Finance
       institutionName: cleanVal(data.institutionName),
       accountOrFolioNumber: cleanCode(data.accountOrFolioNumber),
 
-      // Appliances
       applianceType: cleanVal(data.applianceType),
       capacity: cleanVal(data.capacity),
       energyRating: cleanVal(data.energyRating),
 
-      // Furniture
       material: cleanVal(data.material),
 
-      // Jewellery
       jewelleryType: cleanVal(data.jewelleryType),
       metalPurity: cleanVal(data.metalPurity),
       grossWeightGrams: cleanVal(data.grossWeightGrams),
 
-      // Subscriptions
       subscriptionPlan: cleanVal(data.subscriptionPlan),
       billingCycle: cleanVal(data.billingCycle),
 
       rawText: cleanVal(data.rawText) || textData || '',
 
-      // Document classification metadata
       documentClassification: { docType: mappedDocType, confidence: 0.98 },
       assetCategory: { category: mappedCategory, confidence: 0.98 },
       pagesProcessed: 1,
@@ -523,15 +493,21 @@ Format all dates strictly as DD/MM/YYYY. Return a valid JSON object.`;
   }
 });
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+// Mount Vite in dev mode
+if (process.env.NODE_ENV !== 'production') {
+  const { createServer: createViteServer } = await import('vite');
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa',
+  });
+  app.use(vite.middlewares);
+} else {
+  app.use(express.static(path.join(__dirname, 'dist')));
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
   });
 }
 
-export default app;
-
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on http://0.0.0.0:${PORT}`);
+});
