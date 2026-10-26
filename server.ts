@@ -577,8 +577,8 @@ app.post('/api/scan-document', async (req: Request, res: Response) => {
   }
 });
 
-// Mount Vite in dev mode
-if (process.env.NODE_ENV !== 'production') {
+// Mount Vite in dev mode (local / AI Studio runtime)
+if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({
     server: { middlewareMode: true, hmr: false },
@@ -592,6 +592,10 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server listening on http://0.0.0.0:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on http://0.0.0.0:${PORT}`);
+  });
+}
+
+export default app;

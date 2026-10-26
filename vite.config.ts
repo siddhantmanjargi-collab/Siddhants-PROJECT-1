@@ -10,4 +10,7 @@ export default defineConfig({
     port: 3000,
     hmr: false,
   },
+  build: {
+    chunkSizeWarningLimit: 1000,
+  },
 });
