@@ -186,7 +186,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md">
       <div
         className={`bg-[#16261F] border border-[#2A3B33] rounded-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden transition-all duration-200 ${
-          step === 'review' ? 'max-w-2xl' : 'max-w-xl'
+          step === 'review' ? 'max-w-5xl' : 'max-w-xl'
         }`}
       >
         {/* Header */}

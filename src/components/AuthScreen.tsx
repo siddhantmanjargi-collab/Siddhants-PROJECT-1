@@ -314,7 +314,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   return (
     <div
       className={`w-full mx-auto p-4 flex flex-col items-center justify-center min-h-[88vh] transition-all duration-300 ${
-        step === 'review-doc' ? 'max-w-2xl' : isWideStep ? 'max-w-lg' : 'max-w-md'
+        step === 'review-doc' ? 'max-w-5xl' : isWideStep ? 'max-w-lg' : 'max-w-md'
       }`}
     >
       <VaultDial unlocked={unlocked} size={92} />
