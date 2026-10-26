@@ -204,7 +204,7 @@ export default async function handler(req: any, res: any) {
     }
     parts.push({ text: textContent });
 
-    const candidateModels = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-2.5-flash'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
 
     let responseText = '';
     let lastError: any = null;
