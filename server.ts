@@ -581,7 +581,7 @@ app.post('/api/scan-document', async (req: Request, res: Response) => {
 if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, ws: false },
     appType: 'spa',
   });
   app.use(vite.middlewares);
