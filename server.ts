@@ -162,6 +162,7 @@ function cleanCode(val: any): string {
 
 function resolveServerGeminiKey(): string {
   const candidates = [
+    process.env.ASSET_WALLET_FINAL_PROJECT,
     process.env.GEMINI_API_KEY,
     process.env.GEMINI_API_KEY_ASSET_WALLET,
     process.env.GEMINI_API_KEY_ASSET_WALLET_2,
@@ -191,7 +192,7 @@ app.post('/api/scan-document', async (req: Request, res: Response) => {
     if (!apiKey) {
       return res.status(500).json({
         success: false,
-        error: 'Gemini API key is not configured on the server environment.',
+        error: 'Gemini API key (ASSET_WALLET_FINAL_PROJECT) is not configured on the server environment.',
       });
     }
 
