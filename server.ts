@@ -272,8 +272,8 @@ app.post('/api/scan-document', async (req: Request, res: Response) => {
     }
     parts.push({ text: textContent });
 
-    // Primary: Gemini Flash 3.8 -> Automatic Failover: Gemini Flash 3.6
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.6-flash'];
+    // Primary: Gemini Flash 3.6 -> Fallback: Gemini Flash 3.8 / 2.5
+    const candidateModels = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-2.5-flash'];
 
     let responseText = '';
     let usedModel = '';
