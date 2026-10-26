@@ -4,13 +4,12 @@ import {
   Upload,
   Camera,
   Sparkles,
-  CheckCircle,
   AlertCircle,
-  FileText,
-  ArrowRight
+  FileText
 } from 'lucide-react';
-import { Asset, AssetCategory, DocumentType, DocumentAttachment } from '../types/asset';
+import { Asset, ScanResultData } from '../types/asset';
 import { readDocumentFile } from '../utils/fileHelpers';
+import { ExtractedAssetReviewForm } from './ExtractedAssetReviewForm';
 
 interface ScanModalProps {
   onClose: () => void;
@@ -37,27 +36,8 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
   const [scanError, setScanError] = useState<string | null>(null);
   const [inlineNotice, setInlineNotice] = useState<string | null>(null);
 
-  // Extracted Data Review state
-  const [extractedCategory, setExtractedCategory] = useState<AssetCategory>('vehicular');
-  const [extractedDocType, setExtractedDocType] = useState<DocumentType>('Vehicle Insurance');
-  const [assetName, setAssetName] = useState('');
-  const [owner, setOwner] = useState('');
-  const [vendor, setVendor] = useState('');
-  const [manufacturer, setManufacturer] = useState('');
-  const [model, setModel] = useState('');
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [purchaseDate, setPurchaseDate] = useState('');
-  const [expiryDate, setExpiryDate] = useState('');
-  const [serialNumber, setSerialNumber] = useState('');
-  const [warrantyType, setWarrantyType] = useState('');
-  const [warrantyEnds, setWarrantyEnds] = useState('');
-  const [invoice, setInvoice] = useState('');
-  const [notes, setNotes] = useState('');
-  const [addOns, setAddOns] = useState<string[]>([]);
-  const [reminders, setReminders] = useState<string[]>([]);
-  const [contacts, setContacts] = useState<string[]>([]);
-  const [categoryFields, setCategoryFields] = useState<Record<string, string>>({});
-  const [rawText, setRawText] = useState('');
+  // Full structured extraction result (held in memory until user confirms)
+  const [extractedData, setExtractedData] = useState<ScanResultData | null>(null);
 
   useEffect(() => {
     if (isCameraActive && videoRef.current && streamRef.current) {
@@ -110,13 +90,17 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
 
   const capturePhoto = () => {
     if (!videoRef.current) return;
+    const rawW = videoRef.current.videoWidth || 1280;
+    const rawH = videoRef.current.videoHeight || 720;
+    const MAX_DIM = 1600;
+    const ratio = Math.min(1, MAX_DIM / rawW, MAX_DIM / rawH);
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth || 1280;
-    canvas.height = videoRef.current.videoHeight || 720;
+    canvas.width = Math.round(rawW * ratio);
+    canvas.height = Math.round(rawH * ratio);
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
       const rawB64 = dataUrl.split(',')[1] || '';
       setPreviewUrl(dataUrl);
       setBase64Data(rawB64);
@@ -145,12 +129,12 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     setInlineNotice(null);
     setScanError(null);
     setStep('scanning');
-    setScanProgress(18);
-    setScanStatusMsg('Analyzing document with Gemini Flash OCR...');
+    setScanProgress(22);
+    setScanStatusMsg('Extracting document fields...');
 
     const progressTimer = setInterval(() => {
-      setScanProgress((prev) => (prev < 90 ? prev + 10 : prev));
-    }, 450);
+      setScanProgress((prev) => (prev < 92 ? prev + 14 : prev));
+    }, 300);
 
     try {
       const response = await fetch('/api/scan-document', {
@@ -182,42 +166,8 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
         return;
       }
 
-      const d = resData.data;
-      setExtractedCategory(d.category || 'vehicular');
-      setExtractedDocType(d.docType || 'Other Document');
-      setAssetName(d.assetName || filename.replace(/\.[^/.]+$/, '') || 'Scanned Asset');
-      setOwner(d.owner || '');
-      setVendor(d.vendor || '');
-      setManufacturer(d.manufacturer || '');
-      setModel(d.model || '');
-      setPurchasePrice(d.purchasePrice || '');
-      setPurchaseDate(d.purchaseDate || '');
-      setExpiryDate(d.expiryDate || '');
-      setSerialNumber(d.serialNumber || d.policyNumber || d.serviceTag || '');
-      setWarrantyType(d.warrantyType || '');
-      setWarrantyEnds(d.warrantyEnds || '');
-      setInvoice(d.invoice || '');
-      setNotes(d.notes || '');
-      setAddOns(Array.isArray(d.addOns) ? d.addOns : []);
-      setReminders(Array.isArray(d.reminders) ? d.reminders : []);
-      setContacts(Array.isArray(d.contacts) ? d.contacts : []);
-      setRawText(d.rawText || '');
-
-      const catFields: Record<string, string> = {};
-      if (d.registrationNumber) catFields.registrationNumber = d.registrationNumber;
-      if (d.engineNumber) catFields.engineNumber = d.engineNumber;
-      if (d.chassisNumber) catFields.chassisNumber = d.chassisNumber;
-      if (d.policyType) catFields.policyType = d.policyType;
-      if (d.idv) catFields.idv = d.idv;
-      if (d.storageOrSpecs) catFields.storageOrSpecs = d.storageOrSpecs;
-      if (d.serviceTag) catFields.serviceTag = d.serviceTag;
-      if (d.propertyAddress) catFields.propertyAddress = d.propertyAddress;
-      if (d.institutionName) catFields.institutionName = d.institutionName;
-      setCategoryFields(catFields);
-
-      setTimeout(() => {
-        setStep('review');
-      }, 220);
+      setExtractedData(resData.data as ScanResultData);
+      setStep('review');
     } catch (err: any) {
       clearInterval(progressTimer);
       setScanError(err?.message || 'Network error while contacting the document scanner.');
@@ -225,53 +175,20 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     }
   };
 
-  const handleSave = () => {
-    if (!assetName.trim()) {
-      setInlineNotice('Please enter an Asset Name before saving.');
-      return;
-    }
-
-    const attachment: DocumentAttachment | undefined =
-      base64Data || textData
-        ? {
-            id: `doc-${Date.now()}`,
-            filename: filename || 'Scanned_Document.pdf',
-            mimeType: mimeType || 'application/pdf',
-            base64Data,
-            textData: rawText || textData,
-            uploadedAt: new Date().toISOString(),
-          }
-        : undefined;
-
-    onSaveAsset({
-      assetName: assetName.trim(),
-      category: extractedCategory,
-      docType: extractedDocType,
-      owner,
-      vendor,
-      manufacturer,
-      model,
-      purchasePrice,
-      purchaseDate,
-      expiryDate,
-      serialNumber,
-      warrantyType,
-      warrantyEnds,
-      invoice,
-      notes,
-      addOns,
-      reminders,
-      contacts,
-      categoryFields,
-      attachment,
-    });
-
+  const handleConfirmSave = (
+    assetPayload: Omit<Asset, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
+  ) => {
+    onSaveAsset(assetPayload);
     onClose();
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080F0D]/85 backdrop-blur-md">
-      <div className="bg-[#16261F] border border-[#2A3B33] rounded-2xl w-full max-w-xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <div
+        className={`bg-[#16261F] border border-[#2A3B33] rounded-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden transition-all duration-200 ${
+          step === 'review' ? 'max-w-2xl' : 'max-w-xl'
+        }`}
+      >
         {/* Header */}
         <div className="p-4 sm:p-5 bg-[#1C2E26] border-b border-[#2A3B33] flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -280,12 +197,12 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
             </div>
             <div>
               <h2 className="text-lg font-serif font-medium text-[#EDEDE1]">
-                {step === 'review' ? 'Review Extracted Asset' : 'Scan Document'}
+                {step === 'review' ? 'Review & Edit Extracted Details' : 'Scan Document'}
               </h2>
               <p className="text-xs text-[#8FA79B]">
                 {step === 'review'
-                  ? 'Confirm or adjust extracted details before saving'
-                  : 'Upload a file or capture a photo for automatic extraction'}
+                  ? 'Inspect all extracted fields and edit anything needed before storing'
+                  : 'Upload a file or snap a photo · Review & edit extracted details before storing'}
               </p>
             </div>
           </div>
@@ -365,7 +282,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                 <label className="border-2 border-dashed border-[#2A3B33] hover:border-[#C9A15D] rounded-xl p-8 text-center flex flex-col items-center justify-center cursor-pointer transition-colors group">
                   <Upload size={32} className="text-[#8FA79B] group-hover:text-[#C9A15D] transition-colors mb-3" />
                   <span className="text-sm font-medium text-[#EDEDE1]">
-                    Select a document file to scan
+                    Select a document file to extract
                   </span>
                   <span className="text-xs text-[#8FA79B] mt-1 font-mono">
                     PDF · JPG · PNG · WEBP · DOCX · TXT
@@ -406,7 +323,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
                   disabled={!base64Data && !textData}
                   className="py-2.5 px-4 bg-[#C9A15D] hover:bg-[#E4C98A] disabled:opacity-40 disabled:cursor-not-allowed text-[#14211B] font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition-colors shadow-md whitespace-nowrap"
                 >
-                  <Sparkles size={16} /> Scan & Extract
+                  <Sparkles size={16} /> Scan &amp; Extract
                 </button>
               </div>
             </div>
@@ -454,164 +371,23 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
             </div>
           )}
 
-          {step === 'review' && (
-            <div className="space-y-4 text-xs">
-              <div className="p-3 bg-[#6FA88C]/15 border border-[#6FA88C]/35 rounded-xl flex items-center justify-between text-[#6FA88C]">
-                <span className="flex items-center gap-1.5 font-semibold">
-                  <CheckCircle size={15} /> Fields Extracted Ready for Review
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setStep('capture')}
-                  className="text-[#8FA79B] hover:text-[#EDEDE1] underline"
-                >
-                  Rescan
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Asset Title / Name *
-                  </label>
-                  <input
-                    type="text"
-                    value={assetName}
-                    onChange={(e) => setAssetName(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Category
-                  </label>
-                  <select
-                    value={extractedCategory}
-                    onChange={(e) => setExtractedCategory(e.target.value as AssetCategory)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                  >
-                    <option value="vehicular">Vehicular</option>
-                    <option value="electronics">Electronics</option>
-                    <option value="camera">Camera & Optics</option>
-                    <option value="watch">Watches</option>
-                    <option value="appliances">Appliances</option>
-                    <option value="health">Health Insurance</option>
-                    <option value="identity">Identity & Documents</option>
-                    <option value="property">Property</option>
-                    <option value="finance">Finance</option>
-                    <option value="furniture">Furniture</option>
-                    <option value="jewellery">Jewellery</option>
-                    <option value="machinery">Machinery</option>
-                    <option value="subscriptions">Subscriptions</option>
-                    <option value="other">Other</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Vendor / Insurer
-                  </label>
-                  <input
-                    type="text"
-                    value={vendor}
-                    onChange={(e) => setVendor(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Model / Specs
-                  </label>
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Serial / Policy Number
-                  </label>
-                  <input
-                    type="text"
-                    value={serialNumber}
-                    onChange={(e) => setSerialNumber(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Purchase Price / Amount
-                  </label>
-                  <input
-                    type="text"
-                    value={purchasePrice}
-                    onChange={(e) => setPurchasePrice(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] tabular-nums focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Purchase Date (DD/MM/YYYY)
-                  </label>
-                  <input
-                    type="text"
-                    value={purchaseDate}
-                    onChange={(e) => setPurchaseDate(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Expiry Date (DD/MM/YYYY)
-                  </label>
-                  <input
-                    type="text"
-                    value={expiryDate}
-                    onChange={(e) => setExpiryDate(e.target.value)}
-                    className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Warranty Tier / Entitlement
-                </label>
-                <input
-                  type="text"
-                  value={warrantyType}
-                  onChange={(e) => setWarrantyType(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              {addOns.length > 0 && (
-                <div>
-                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                    Detected Coverage & Features
-                  </label>
-                  <p className="text-xs text-[#EDEDE1]">
-                    {addOns.join(' · ')}
-                  </p>
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={handleSave}
-                className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-lg mt-4 text-sm flex items-center justify-center gap-2 whitespace-nowrap"
-              >
-                Save to Asset Vault <ArrowRight size={16} />
-              </button>
-            </div>
+          {step === 'review' && extractedData && (
+            <ExtractedAssetReviewForm
+              extractedData={extractedData}
+              fileMeta={{
+                filename,
+                mimeType,
+                base64Data,
+                textData,
+                previewUrl,
+                sizeBytes: fileSizeBytes,
+              }}
+              submitLabel="Confirm & Store Asset"
+              onRescan={() => setStep('capture')}
+              onCancelOrSkip={onClose}
+              cancelOrSkipLabel="Discard without storing"
+              onConfirmSave={handleConfirmSave}
+            />
           )}
         </div>
       </div>

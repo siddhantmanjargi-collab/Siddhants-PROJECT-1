@@ -8,13 +8,15 @@ import {
   Camera,
   Sparkles,
   FileText,
-  CheckCircle,
+  ShieldCheck,
+  Clock,
+  SlidersHorizontal,
   AlertCircle,
   ArrowRight,
   X
 } from 'lucide-react';
 import { VaultDial } from './VaultDial';
-import { Asset, AssetCategory, DocumentAttachment, DocumentType, User } from '../types/asset';
+import { Asset, ScanResultData, User } from '../types/asset';
 import { setStoredUser } from '../utils/storage';
 import {
   signUpUser,
@@ -23,6 +25,7 @@ import {
   saveUserAssetToCloud
 } from '../lib/supabase';
 import { readDocumentFile } from '../utils/fileHelpers';
+import { ExtractedAssetReviewForm } from './ExtractedAssetReviewForm';
 
 interface AuthScreenProps {
   onLoginSuccess: (user: User) => void;
@@ -31,6 +34,7 @@ interface AuthScreenProps {
 type OnboardingStep =
   | 'credentials'
   | 'display-name'
+  | 'intro'
   | 'first-document'
   | 'scanning-doc'
   | 'review-doc';
@@ -50,7 +54,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
 
-  // First Document Onboarding Scan State
+  // First Document Onboarding Scan State (held in memory until user confirms)
   const [filename, setFilename] = useState('');
   const [mimeType, setMimeType] = useState('');
   const [base64Data, setBase64Data] = useState('');
@@ -65,28 +69,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   const [scanProgress, setScanProgress] = useState(0);
   const [scanStatusMsg, setScanStatusMsg] = useState('Analyzing document...');
   const [scanError, setScanError] = useState<string | null>(null);
-
-  // Extracted First Document Fields
-  const [extractedCategory, setExtractedCategory] = useState<AssetCategory>('vehicular');
-  const [extractedDocType, setExtractedDocType] = useState<DocumentType>('Other Document');
-  const [assetName, setAssetName] = useState('');
-  const [owner, setOwner] = useState('');
-  const [vendor, setVendor] = useState('');
-  const [manufacturer, setManufacturer] = useState('');
-  const [model, setModel] = useState('');
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [purchaseDate, setPurchaseDate] = useState('');
-  const [expiryDate, setExpiryDate] = useState('');
-  const [serialNumber, setSerialNumber] = useState('');
-  const [warrantyType, setWarrantyType] = useState('');
-  const [warrantyEnds, setWarrantyEnds] = useState('');
-  const [invoice, setInvoice] = useState('');
-  const [notes, setNotes] = useState('');
-  const [addOns, setAddOns] = useState<string[]>([]);
-  const [reminders, setReminders] = useState<string[]>([]);
-  const [contacts, setContacts] = useState<string[]>([]);
-  const [categoryFields, setCategoryFields] = useState<Record<string, string>>({});
-  const [rawText, setRawText] = useState('');
+  const [extractedData, setExtractedData] = useState<ScanResultData | null>(null);
 
   useEffect(() => {
     if (isCameraActive && videoRef.current && streamRef.current) {
@@ -192,8 +175,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     setStoredUser(updatedUser);
     setIsLoading(false);
 
-    // Move to First Document Upload onboarding screen
-    setStep('first-document');
+    // Move to short website intro before asking the user to upload a file
+    setStep('intro');
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -232,13 +215,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
 
   const capturePhoto = () => {
     if (!videoRef.current) return;
+    const rawW = videoRef.current.videoWidth || 1280;
+    const rawH = videoRef.current.videoHeight || 720;
+    const MAX_DIM = 1600;
+    const ratio = Math.min(1, MAX_DIM / rawW, MAX_DIM / rawH);
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth || 1280;
-    canvas.height = videoRef.current.videoHeight || 720;
+    canvas.width = Math.round(rawW * ratio);
+    canvas.height = Math.round(rawH * ratio);
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
       const rawB64 = dataUrl.split(',')[1] || '';
       setPreviewUrl(dataUrl);
       setBase64Data(rawB64);
@@ -259,12 +246,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     setError('');
     setScanError(null);
     setStep('scanning-doc');
-    setScanProgress(18);
-    setScanStatusMsg('Scanning your document with Gemini Flash...');
+    setScanProgress(22);
+    setScanStatusMsg('Reading document fields...');
 
     const progressTimer = setInterval(() => {
-      setScanProgress((prev) => (prev < 90 ? prev + 10 : prev));
-    }, 450);
+      setScanProgress((prev) => (prev < 92 ? prev + 14 : prev));
+    }, 300);
 
     try {
       const response = await fetch('/api/scan-document', {
@@ -294,92 +281,25 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
         return;
       }
 
-      const d = resData.data;
-      setExtractedCategory(d.category || 'vehicular');
-      setExtractedDocType(d.docType || 'Other Document');
-      setAssetName(d.assetName || filename.replace(/\.[^/.]+$/, '') || 'Scanned Asset');
-      setOwner(d.owner || pendingUser?.name || '');
-      setVendor(d.vendor || '');
-      setManufacturer(d.manufacturer || '');
-      setModel(d.model || '');
-      setPurchasePrice(d.purchasePrice || '');
-      setPurchaseDate(d.purchaseDate || '');
-      setExpiryDate(d.expiryDate || '');
-      setSerialNumber(d.serialNumber || d.policyNumber || d.serviceTag || '');
-      setWarrantyType(d.warrantyType || '');
-      setWarrantyEnds(d.warrantyEnds || '');
-      setInvoice(d.invoice || '');
-      setNotes(d.notes || '');
-      setAddOns(Array.isArray(d.addOns) ? d.addOns : []);
-      setReminders(Array.isArray(d.reminders) ? d.reminders : []);
-      setContacts(Array.isArray(d.contacts) ? d.contacts : []);
-      setRawText(d.rawText || '');
-
-      const catFields: Record<string, string> = {};
-      if (d.registrationNumber) catFields.registrationNumber = d.registrationNumber;
-      if (d.engineNumber) catFields.engineNumber = d.engineNumber;
-      if (d.chassisNumber) catFields.chassisNumber = d.chassisNumber;
-      if (d.policyType) catFields.policyType = d.policyType;
-      if (d.idv) catFields.idv = d.idv;
-      if (d.storageOrSpecs) catFields.storageOrSpecs = d.storageOrSpecs;
-      if (d.serviceTag) catFields.serviceTag = d.serviceTag;
-      if (d.propertyAddress) catFields.propertyAddress = d.propertyAddress;
-      if (d.institutionName) catFields.institutionName = d.institutionName;
-      setCategoryFields(catFields);
-
-      setTimeout(() => {
-        setStep('review-doc');
-      }, 220);
+      setExtractedData(resData.data as ScanResultData);
+      setStep('review-doc');
     } catch (err: any) {
       clearInterval(progressTimer);
       setScanError(err?.message || 'Unable to reach document scanner service.');
     }
   };
 
-  const handleSaveFirstAssetAndEnter = async () => {
+  const handleConfirmFirstAssetSave = async (
+    assetPayload: Omit<Asset, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
+  ) => {
     if (!pendingUser) return;
-    if (!assetName.trim()) {
-      setError('Please enter a name for this asset.');
-      return;
-    }
-
     setIsLoading(true);
 
-    const attachment: DocumentAttachment | undefined =
-      base64Data || textData
-        ? {
-            id: `doc-${Date.now()}`,
-            filename: filename || 'First_Document.pdf',
-            mimeType: mimeType || 'application/pdf',
-            base64Data,
-            textData: rawText || textData,
-            uploadedAt: new Date().toISOString(),
-          }
-        : undefined;
-
     const firstAsset: Asset = {
+      ...assetPayload,
       id: `ast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       userId: pendingUser.id,
-      assetName: assetName.trim(),
-      category: extractedCategory,
-      docType: extractedDocType,
-      owner: owner || pendingUser.name,
-      vendor,
-      manufacturer,
-      model,
-      purchasePrice,
-      purchaseDate,
-      expiryDate,
-      serialNumber,
-      warrantyType,
-      warrantyEnds,
-      invoice,
-      notes,
-      addOns,
-      reminders,
-      contacts,
-      categoryFields,
-      attachment,
+      owner: assetPayload.owner || pendingUser.name,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -389,12 +309,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     completeAuth(pendingUser);
   };
 
-  const isWideStep = step === 'review-doc';
+  const isWideStep = step === 'review-doc' || step === 'intro';
 
   return (
     <div
       className={`w-full mx-auto p-4 flex flex-col items-center justify-center min-h-[88vh] transition-all duration-300 ${
-        isWideStep ? 'max-w-xl' : 'max-w-md'
+        step === 'review-doc' ? 'max-w-2xl' : isWideStep ? 'max-w-lg' : 'max-w-md'
       }`}
     >
       <VaultDial unlocked={unlocked} size={92} />
@@ -526,11 +446,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
           </div>
         )}
 
-        {/* STEP 2 (NEW SIGN-UP ONLY): WHAT SHOULD WE CALL YOU? */}
+        {/* STEP 1 OF 3 (NEW SIGN-UP ONLY): WHAT SHOULD WE CALL YOU? */}
         {step === 'display-name' && pendingUser && (
           <form onSubmit={handleDisplayNameSubmit} className="space-y-4">
             <p className="font-mono text-xs text-[#C9A15D] text-center">
-              Step 1 of 2 · Welcome
+              Step 1 of 3 · Welcome
             </p>
             <h1 className="font-serif text-2xl sm:text-3xl text-center font-medium text-[#EDEDE1]">
               What should we call you?
@@ -566,12 +486,108 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
           </form>
         )}
 
-        {/* STEP 3 (NEW SIGN-UP ONLY): UPLOAD YOUR FIRST DOCUMENT */}
+        {/* STEP 2 OF 3 (NEW SIGN-UP ONLY): SHORT WEBSITE INTRO BEFORE FILE UPLOAD */}
+        {step === 'intro' && pendingUser && (
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-xs text-[#C9A15D]">
+                Step 2 of 3 · How Asset Wallet Works
+              </span>
+              <button
+                type="button"
+                onClick={() => completeAuth(pendingUser)}
+                className="text-xs text-[#8FA79B] hover:text-[#EDEDE1] transition-colors whitespace-nowrap"
+              >
+                Skip to vault →
+              </button>
+            </div>
+
+            <div>
+              <h1 className="font-serif text-2xl font-medium text-[#EDEDE1] mb-1.5">
+                Welcome to Asset Wallet, {pendingUser.name}
+              </h1>
+              <p className="text-[#8FA79B] text-sm leading-relaxed">
+                Your private ledger for keeping important ownership documents, warranties, and policies organized and up to date.
+              </p>
+            </div>
+
+            <div className="divide-y divide-[#2A3B33] border-y border-[#2A3B33]">
+              <div className="py-3.5 flex items-start gap-3">
+                <ShieldCheck size={18} className="text-[#C9A15D] shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-[#EDEDE1]">
+                    One Private Vault for Every Asset
+                  </h3>
+                  <p className="text-xs text-[#8FA79B] mt-0.5 leading-relaxed">
+                    Keep vehicle insurance &amp; RC, electronics invoices, warranty cards, health policies, property deeds, and subscriptions in one place.
+                  </p>
+                </div>
+              </div>
+
+              <div className="py-3.5 flex items-start gap-3">
+                <Sparkles size={18} className="text-[#C9A15D] shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-[#EDEDE1]">
+                    Fast OCR Document Extraction
+                  </h3>
+                  <p className="text-xs text-[#8FA79B] mt-0.5 leading-relaxed">
+                    Upload a PDF, image, or Word document—or snap a camera photo—to pull out dates, policy or serial numbers, pricing, and coverage automatically.
+                  </p>
+                </div>
+              </div>
+
+              <div className="py-3.5 flex items-start gap-3">
+                <SlidersHorizontal size={18} className="text-[#6FA88C] shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-[#EDEDE1]">
+                    Review &amp; Edit Before Anything Is Stored
+                  </h3>
+                  <p className="text-xs text-[#8FA79B] mt-0.5 leading-relaxed">
+                    Files are never saved blindly. After extraction finishes, you inspect every detected field, make any edits you want, and confirm to store.
+                  </p>
+                </div>
+              </div>
+
+              <div className="py-3.5 flex items-start gap-3">
+                <Clock size={18} className="text-[#E0913F] shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-[#EDEDE1]">
+                    Proactive Expiry &amp; Renewal Tracking
+                  </h3>
+                  <p className="text-xs text-[#8FA79B] mt-0.5 leading-relaxed">
+                    Spot expiring policies and warranties early with automatic day countdowns and action reminders.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setStep('first-document')}
+                className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] text-[#14211B] font-semibold py-3 rounded-xl transition-colors shadow-md flex items-center justify-center gap-2 text-sm whitespace-nowrap"
+              >
+                <span>Continue to Upload First Document</span>
+                <ArrowRight size={16} />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => completeAuth(pendingUser)}
+                className="w-full py-1.5 text-xs text-[#8FA79B] hover:text-[#EDEDE1] transition-colors text-center"
+              >
+                Skip for now and enter empty vault
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 3 OF 3 (NEW SIGN-UP ONLY): UPLOAD YOUR FIRST DOCUMENT */}
         {step === 'first-document' && pendingUser && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="font-mono text-xs text-[#C9A15D]">
-                Step 2 of 2 · First Document
+                Step 3 of 3 · First Document
               </span>
               <button
                 type="button"
@@ -587,7 +603,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
                 Upload your first document
               </h1>
               <p className="text-[#8FA79B] text-sm leading-relaxed">
-                Hi {pendingUser.name}, upload an invoice, policy, or warranty—or snap a photo—to scan it into your vault automatically.
+                Select a bill, policy, or warranty—or snap a photo. We&apos;ll extract all details so you can review and edit them before storing.
               </p>
             </div>
 
@@ -650,7 +666,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
               <label className="border-2 border-dashed border-[#2A3B33] hover:border-[#C9A15D] rounded-xl p-7 text-center flex flex-col items-center justify-center cursor-pointer transition-colors group">
                 <Upload size={28} className="text-[#8FA79B] group-hover:text-[#C9A15D] transition-colors mb-2.5" />
                 <span className="text-sm font-medium text-[#EDEDE1]">
-                  Choose a document file to upload
+                  Choose a document file to extract
                 </span>
                 <span className="text-xs text-[#8FA79B] mt-1 font-mono">
                   PDF · JPG · PNG · WEBP · DOCX · TXT
@@ -691,7 +707,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
                 disabled={!base64Data && !textData}
                 className="py-2.5 px-3 bg-[#C9A15D] hover:bg-[#E4C98A] disabled:opacity-40 disabled:cursor-not-allowed text-[#14211B] font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition-colors shadow-md whitespace-nowrap"
               >
-                <Sparkles size={15} /> Scan with AI
+                <Sparkles size={15} /> Extract Details
               </button>
             </div>
 
@@ -757,161 +773,37 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
           </div>
         )}
 
-        {/* STEP 5: REVIEW FIRST EXTRACTED DOCUMENT */}
-        {step === 'review-doc' && pendingUser && (
-          <div className="space-y-4 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-1.5 font-semibold text-[#6FA88C]">
-                <CheckCircle size={15} /> First Document Scanned
-              </span>
-              <button
-                type="button"
-                onClick={() => setStep('first-document')}
-                className="text-[#8FA79B] hover:text-[#EDEDE1] underline"
-              >
-                Rescan
-              </button>
-            </div>
-
+        {/* STEP 5: FULL EXTRACTED DETAILS REVIEW & EDIT BEFORE STORING */}
+        {step === 'review-doc' && pendingUser && extractedData && (
+          <div className="space-y-4">
             <div>
               <h2 className="font-serif text-xl font-medium text-[#EDEDE1]">
-                Confirm Asset Details
+                Review Extracted Document Details
               </h2>
               <p className="text-[#8FA79B] text-xs mt-0.5">
-                Review the extracted details before saving to {pendingUser.name}&apos;s Vault.
+                Inspect all extracted fields below and make any edits before storing in {pendingUser.name}&apos;s Vault.
               </p>
             </div>
 
-            {error && <p className="text-[#C97B6B] text-xs font-medium">{error}</p>}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[46vh] overflow-y-auto pr-1">
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Asset Name *
-                </label>
-                <input
-                  type="text"
-                  value={assetName}
-                  onChange={(e) => setAssetName(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Category
-                </label>
-                <select
-                  value={extractedCategory}
-                  onChange={(e) => setExtractedCategory(e.target.value as AssetCategory)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                >
-                  <option value="vehicular">Vehicular</option>
-                  <option value="electronics">Electronics</option>
-                  <option value="camera">Camera & Optics</option>
-                  <option value="watch">Watches</option>
-                  <option value="appliances">Appliances</option>
-                  <option value="health">Health Insurance</option>
-                  <option value="identity">Identity & Documents</option>
-                  <option value="property">Property</option>
-                  <option value="finance">Finance</option>
-                  <option value="furniture">Furniture</option>
-                  <option value="jewellery">Jewellery</option>
-                  <option value="machinery">Machinery</option>
-                  <option value="subscriptions">Subscriptions</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Vendor / Insurer
-                </label>
-                <input
-                  type="text"
-                  value={vendor}
-                  onChange={(e) => setVendor(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Model / Specs
-                </label>
-                <input
-                  type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Serial / Policy Number
-                </label>
-                <input
-                  type="text"
-                  value={serialNumber}
-                  onChange={(e) => setSerialNumber(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#E4C98A] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Purchase Price / Amount
-                </label>
-                <input
-                  type="text"
-                  value={purchasePrice}
-                  onChange={(e) => setPurchasePrice(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] tabular-nums focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Purchase Date (DD/MM/YYYY)
-                </label>
-                <input
-                  type="text"
-                  value={purchaseDate}
-                  onChange={(e) => setPurchaseDate(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                  Expiry Date (DD/MM/YYYY)
-                </label>
-                <input
-                  type="text"
-                  value={expiryDate}
-                  onChange={(e) => setExpiryDate(e.target.value)}
-                  className="w-full bg-[#1C2E26] border border-[#2A3B33] rounded-lg p-2.5 text-[#EDEDE1] font-mono tabular-nums focus:border-[#C9A15D] outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 pt-2">
-              <button
-                type="button"
-                disabled={isLoading}
-                onClick={handleSaveFirstAssetAndEnter}
-                className="w-full bg-[#C9A15D] hover:bg-[#E4C98A] disabled:opacity-50 text-[#14211B] font-bold py-3 rounded-xl transition-colors shadow-lg text-sm flex items-center justify-center gap-2 whitespace-nowrap"
-              >
-                {isLoading ? 'Saving to Vault...' : 'Save Asset & Enter Vault'} <ArrowRight size={16} />
-              </button>
-              <button
-                type="button"
-                onClick={() => completeAuth(pendingUser)}
-                className="w-full py-1.5 text-xs text-[#8FA79B] hover:text-[#EDEDE1] transition-colors text-center"
-              >
-                Skip without saving
-              </button>
+            <div className="max-h-[62vh] overflow-y-auto pr-1">
+              <ExtractedAssetReviewForm
+                extractedData={extractedData}
+                fileMeta={{
+                  filename,
+                  mimeType,
+                  base64Data,
+                  textData,
+                  previewUrl,
+                  sizeBytes: fileSizeBytes,
+                }}
+                defaultOwner={pendingUser.name}
+                submitLabel="Confirm & Store in Vault"
+                isSubmitting={isLoading}
+                onRescan={() => setStep('first-document')}
+                onCancelOrSkip={() => completeAuth(pendingUser)}
+                cancelOrSkipLabel="Discard file and enter empty vault"
+                onConfirmSave={handleConfirmFirstAssetSave}
+              />
             </div>
           </div>
         )}
