@@ -2,14 +2,6 @@ import path from 'path';
 import zlib from 'zlib';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '25mb',
-    },
-  },
-};
-
 const GEMINI_INLINE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -28,8 +20,7 @@ function normalizeMimeType(rawMime?: string, filename?: string): string {
   if (lowerMime === 'image/webp' || ext === '.webp') return 'image/webp';
   if (lowerMime === 'image/heic' || ext === '.heic') return 'image/heic';
   if (lowerMime === 'image/heif' || ext === '.heif') return 'image/heif';
-  if (rawMime && lowerMime === 'application/pdf') return 'application/pdf';
-  if (ext === '.pdf') return 'application/pdf';
+  if (lowerMime === 'application/pdf' || ext === '.pdf') return 'application/pdf';
   if (
     lowerMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     ext === '.docx'
@@ -61,7 +52,7 @@ function extractDocxText(base64Str: string): string {
       const dataStart = offset + 30 + nameLen + extraLen;
       const dataEnd = dataStart + compSize;
 
-      if (entryName === 'word/document.xml' && dataEnd <= buf.length) {
+      if (entryName === 'word/document.xml' && dataEnd <= buf.length && compSize > 0) {
         const rawSlice = buf.subarray(dataStart, dataEnd);
         let xmlStr = '';
         if (compression === 0) {
@@ -72,8 +63,10 @@ function extractDocxText(base64Str: string): string {
         if (xmlStr) {
           const text = xmlStr
             .replace(/<\/w:p>/g, '\n')
+            .replace(/<w:tab\/>/g, '\t')
             .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+/g, ' ')
+            .replace(/\s+\n/g, '\n')
+            .replace(/[ \t]{2,}/g, ' ')
             .trim();
           chunks.push(text);
         }
@@ -87,13 +80,46 @@ function extractDocxText(base64Str: string): string {
   }
 }
 
-function stripJsonCodeFences(raw: string): string {
-  return raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+function parseModelJsonObject(raw: string): Record<string, any> {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  }
+  const firstBrace = cleaned.indexOf('{');
+  const firstBracket = cleaned.indexOf('[');
+  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+  } else if (firstBracket !== -1) {
+    const lastBracket = cleaned.lastIndexOf(']');
+    if (lastBracket > firstBracket) {
+      cleaned = cleaned.slice(firstBracket, lastBracket + 1);
+    }
+  }
+
+  let parsed = JSON.parse(cleaned);
+  if (Array.isArray(parsed)) {
+    parsed = parsed.find((item) => item && typeof item === 'object') || {};
+  }
+  if (parsed && typeof parsed === 'object') {
+    if (parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
+      return parsed.data;
+    }
+    if (parsed.document && typeof parsed.document === 'object' && !Array.isArray(parsed.document)) {
+      return parsed.document;
+    }
+    return parsed;
+  }
+  throw new Error('Model did not return a valid JSON object.');
 }
 
 function cleanCode(str: any): string {
-  if (!str || typeof str !== 'string') return '';
-  const trimmed = str.trim();
+  if (str === null || str === undefined) return '';
+  const raw = typeof str === 'number' ? String(str) : typeof str === 'string' ? str : '';
+  if (!raw) return '';
+  const trimmed = raw.trim();
   const upper = trimmed.toUpperCase();
   const invalidWords = [
     'NUMBER', 'NO', 'NO.', 'NUM', 'NA', 'N/A', 'NONE', 'NULL', 'UNDEFINED', 'NIL',
@@ -131,26 +157,26 @@ function resolveServerGeminiKeys(): string[] {
 }
 
 const EXTRACTION_PROMPT = (filename?: string) =>
-  `Extract visible asset & document fields from "${filename || 'document'}" as a flat JSON object.
+  `Perform accurate OCR and structured asset extraction on "${filename || 'document'}". Return ONLY a flat JSON object (never an array).
 Rules:
-- ALWAYS include: "category", "docType", "assetName".
-- OMIT any optional field that is not visible in the document (do NOT output empty strings or guess values).
-- Format all dates strictly as DD/MM/YYYY.
+- ALWAYS include: "category", "docType", "assetName", "rawText".
+- "rawText": clean verbatim OCR transcription of the key visible text, dates, numbers, line items, and identifiers on the document (up to 2500 characters, newline-separated).
+- OMIT any optional field that is not visible in the document (do NOT output empty strings or fabricate values).
+- Format all dates strictly as DD/MM/YYYY. Distinguish "expiryDate", "warrantyEnds", and "renewalDate" accurately from the text.
 - "category": one of "vehicular","electronics","camera","watch","appliances","health","identity","property","finance","furniture","jewellery","machinery","subscriptions","other"
 - "docType": one of "Vehicle Insurance","Vehicle Registration Certificate (RC)","Invoice","Receipt","Warranty Certificate","Extended Warranty","Service Record","User Manual","Property Document","Health Insurance","Bank / Investment Statement","Subscription / Membership","Other Document"
-- Optional fields (include ONLY when present): owner, vendor, manufacturer, model, purchasePrice (with currency symbol), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber, policyNumber, assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes (brief 1-2 sentence summary), addOns (string[]), reminders (string[]), contacts (string[]), registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
+- Optional fields (include ONLY when visible): owner, vendor, manufacturer, model, purchasePrice (include currency symbol), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber, policyNumber, assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes (concise 1-2 sentence summary), addOns (string[]), reminders (string[]), contacts (string[]), registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
 
 async function extractWithGeminiKey(
   apiKey: string,
   parts: any[]
-): Promise<{ parsed: any; modelUsed: string }> {
+): Promise<{ parsed: Record<string, any>; modelUsed: string }> {
   const ai = new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
       },
-      timeout: 15000,
       retryOptions: {
         attempts: 1,
       },
@@ -160,13 +186,21 @@ async function extractWithGeminiKey(
   const primaryController = new AbortController();
   const backupController = new AbortController();
   let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
+  let primaryDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  let backupDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   let settled = false;
+
+  const clearTimers = () => {
+    if (hedgeTimer) clearTimeout(hedgeTimer);
+    if (primaryDeadlineTimer) clearTimeout(primaryDeadlineTimer);
+    if (backupDeadlineTimer) clearTimeout(backupDeadlineTimer);
+  };
 
   const invokeModel = async (
     modelName: string,
     thinkingLevel: ThinkingLevel,
     signal: AbortSignal
-  ): Promise<{ parsed: any; modelUsed: string }> => {
+  ): Promise<{ parsed: Record<string, any>; modelUsed: string }> => {
     const resObj = await ai.models.generateContent({
       model: modelName,
       contents: { parts },
@@ -179,21 +213,21 @@ async function extractWithGeminiKey(
     });
     const raw = resObj?.text?.trim() || '';
     if (!raw) {
-      throw new Error(`Empty response from ${modelName}`);
+      throw new Error(`Empty OCR response from ${modelName}`);
     }
-    const parsed = JSON.parse(stripJsonCodeFences(raw));
+    const parsed = parseModelJsonObject(raw);
     return { parsed, modelUsed: modelName };
   };
 
-  return new Promise<{ parsed: any; modelUsed: string }>((resolve, reject) => {
+  return new Promise<{ parsed: Record<string, any>; modelUsed: string }>((resolve, reject) => {
     const errors: any[] = [];
     let backupStarted = false;
     let pendingCount = 1;
 
-    const finishSuccess = (result: { parsed: any; modelUsed: string }) => {
+    const finishSuccess = (result: { parsed: Record<string, any>; modelUsed: string }) => {
       if (settled) return;
       settled = true;
-      if (hedgeTimer) clearTimeout(hedgeTimer);
+      clearTimers();
       primaryController.abort();
       backupController.abort();
       resolve(result);
@@ -212,8 +246,8 @@ async function extractWithGeminiKey(
 
       if (pendingCount <= 0 && backupStarted) {
         settled = true;
-        if (hedgeTimer) clearTimeout(hedgeTimer);
-        reject(errors[0] || new Error('Gemini 3.8 document extraction failed.'));
+        clearTimers();
+        reject(errors[errors.length - 1] || errors[0] || new Error('Document OCR extraction failed.'));
       }
     };
 
@@ -221,21 +255,41 @@ async function extractWithGeminiKey(
       if (settled || backupStarted) return;
       backupStarted = true;
       pendingCount += 1;
+      backupDeadlineTimer = setTimeout(() => backupController.abort(), 32000);
       invokeModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL, backupController.signal)
         .then(finishSuccess)
         .catch((err) => handleFailure(err, false));
     };
 
     // Primary model: Gemini 3.8 Flash
+    primaryDeadlineTimer = setTimeout(() => primaryController.abort(), 28000);
     invokeModel('gemini-3.8-flash', ThinkingLevel.LOW, primaryController.signal)
       .then(finishSuccess)
       .catch((err) => handleFailure(err, true));
 
-    // Hedged fast-failover if upstream gemini-3.8-flash experiences queuing (> 2.5s)
+    // Hedged fast-failover if upstream gemini-3.8-flash queues (> 1.8s)
     hedgeTimer = setTimeout(() => {
       startBackup();
-    }, 2500);
+    }, 1800);
   });
+}
+
+async function readParsedBody(req: any): Promise<any> {
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+    return req.body;
+  }
+  if (typeof req.body === 'string' && req.body.trim()) {
+    return JSON.parse(req.body);
+  }
+  if (Buffer.isBuffer(req.body)) {
+    return JSON.parse(req.body.toString('utf-8'));
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const rawStr = Buffer.concat(chunks).toString('utf-8').trim();
+  return rawStr ? JSON.parse(rawStr) : {};
 }
 
 export default async function handler(req: any, res: any) {
@@ -252,7 +306,8 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const { mimeType, base64Data, textData, filename } = req.body || {};
+    const body = await readParsedBody(req);
+    const { mimeType, base64Data, textData, filename } = body || {};
 
     if (!base64Data && !textData) {
       return res.status(400).json({ success: false, error: 'No document data provided.' });
@@ -260,9 +315,9 @@ export default async function handler(req: any, res: any) {
 
     const cleanBase64 =
       typeof base64Data === 'string' && base64Data.includes(',')
-        ? base64Data.split(',')[1]
+        ? base64Data.split(',').pop()!.trim()
         : typeof base64Data === 'string'
-        ? base64Data
+        ? base64Data.trim()
         : '';
 
     const normMime = normalizeMimeType(mimeType, filename);
@@ -305,13 +360,15 @@ export default async function handler(req: any, res: any) {
     }
     parts.push({ text: textContent });
 
-    let data: any = null;
+    let data: Record<string, any> | null = null;
+    let usedModel = '';
     let lastError: any = null;
 
     for (const key of apiKeys) {
       try {
         const result = await extractWithGeminiKey(key, parts);
         data = result.parsed;
+        usedModel = result.modelUsed;
         break;
       } catch (err: any) {
         lastError = err;
@@ -323,12 +380,14 @@ export default async function handler(req: any, res: any) {
       const userFriendlyErr =
         rawErr.includes('429') || rawErr.includes('RESOURCE_EXHAUSTED')
           ? 'Gemini API rate limit reached (429). Please wait a moment and try scanning again.'
-          : `Document scan error: ${rawErr || 'Gemini 3.8 failed to process this document.'}`;
+          : `Document scan error: ${rawErr || 'OCR service failed to process this document.'}`;
       return res.status(502).json({ success: false, error: userFriendlyErr });
     }
 
     function cleanVal(v: any): string {
-      if (!v || typeof v !== 'string') return '';
+      if (v === null || v === undefined) return '';
+      if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+      if (typeof v !== 'string') return '';
       const s = v.trim();
       if (['null', 'undefined', 'n/a', 'none'].includes(s.toLowerCase())) return '';
       return s;
@@ -389,6 +448,7 @@ export default async function handler(req: any, res: any) {
     }
 
     const sanitizedData = {
+      modelUsed: usedModel,
       category: mappedCategory,
       docType: mappedDocType,
       assetName: cleanVal(data.assetName) || cleanVal(data.model) || filename?.replace(/\.[^/.]+$/, '') || 'Scanned Asset',
@@ -397,19 +457,19 @@ export default async function handler(req: any, res: any) {
       manufacturer: cleanVal(data.manufacturer),
       model: cleanVal(data.model),
       purchasePrice: cleanVal(data.purchasePrice),
-      purchaseDate: cleanVal(data.purchaseDate) || cleanVal(data.warrantyStartDate),
-      expiryDate: cleanVal(data.expiryDate) || cleanVal(data.warrantyEnds),
+      purchaseDate: cleanVal(data.purchaseDate),
+      expiryDate: cleanVal(data.expiryDate),
       renewalDate: cleanVal(data.renewalDate),
-      warrantyEnds: cleanVal(data.warrantyEnds || data.expiryDate),
+      warrantyEnds: cleanVal(data.warrantyEnds),
       warrantyType: cleanVal(data.warrantyType),
-      warrantyStartDate: cleanVal(data.warrantyStartDate),
-      serialNumber: cleanCode(data.serialNumber || data.serviceTag || data.assetId),
-      policyNumber: cleanCode(data.serialNumber),
+      warrantyStartDate: cleanVal(data.warrantyStartDate || data.purchaseDate),
+      serialNumber: cleanCode(data.serialNumber || data.serviceTag || data.assetId || data.policyNumber || data.accountOrFolioNumber),
+      policyNumber: cleanCode(data.policyNumber || data.serialNumber),
       invoice: cleanCode(data.invoice),
       verificationUrl: cleanVal(data.verificationUrl),
       notes: cleanVal(data.notes),
-      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : [],
-      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : [],
+      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : data.addOns ? [cleanVal(data.addOns)] : [],
+      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : data.reminders ? [cleanVal(data.reminders)] : [],
       contacts: contactsArr,
       registrationNumber: cleanCode(data.registrationNumber),
       engineNumber: cleanCode(data.engineNumber),

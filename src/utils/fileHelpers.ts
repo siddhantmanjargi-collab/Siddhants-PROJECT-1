@@ -60,14 +60,14 @@ function optimizeImageDataUrl(
 
     const img = new Image();
     img.onload = () => {
-      const MAX_DIM = 1400;
+      const MAX_DIM = 1600;
       let { width, height } = img;
 
-      // Downscale or compress if larger than MAX_DIM or file is > 350KB for faster OCR upload
+      // Downscale or compress if larger than MAX_DIM or file is > 450KB for crisp, fast OCR upload
       const rawB64 = dataUrl.includes(',') ? dataUrl.split(',')[1] || '' : dataUrl;
       const approxBytes = Math.round((rawB64.length * 3) / 4);
 
-      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 350 * 1024) {
+      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 450 * 1024) {
         resolve({
           dataUrl,
           mimeType: originalMime,
@@ -96,7 +96,7 @@ function optimizeImageDataUrl(
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
 
-      const compressedUrl = canvas.toDataURL('image/jpeg', 0.8);
+      const compressedUrl = canvas.toDataURL('image/jpeg', 0.85);
       const compB64 = compressedUrl.split(',')[1] || '';
       resolve({
         dataUrl: compressedUrl,
@@ -121,6 +121,17 @@ function optimizeImageDataUrl(
 export function readDocumentFile(file: File): Promise<PreparedDocumentPayload> {
   return new Promise((resolve, reject) => {
     const mimeType = inferMimeType(file);
+
+    // Non-image files (e.g. PDFs) are sent as base64 JSON; cap at 3.2MB binary (~4.3MB base64) so serverless endpoints never reject with HTTP 413
+    if (!mimeType.startsWith('image/') && mimeType !== 'text/plain' && file.size > 3.2 * 1024 * 1024) {
+      reject(
+        new Error(
+          'This PDF is larger than 3.2 MB. Please upload a smaller PDF or take a clear photo/screenshot of the document page.'
+        )
+      );
+      return;
+    }
+
     const reader = new FileReader();
 
     reader.onerror = () => {
