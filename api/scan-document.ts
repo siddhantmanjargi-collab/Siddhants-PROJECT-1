@@ -1,6 +1,6 @@
 import path from 'path';
 import zlib from 'zlib';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 export const config = {
   api: {
@@ -28,7 +28,8 @@ function normalizeMimeType(rawMime?: string, filename?: string): string {
   if (lowerMime === 'image/webp' || ext === '.webp') return 'image/webp';
   if (lowerMime === 'image/heic' || ext === '.heic') return 'image/heic';
   if (lowerMime === 'image/heif' || ext === '.heif') return 'image/heif';
-  if (lowerMime === 'application/pdf' || ext === '.pdf') return 'application/pdf';
+  if (rawMime && lowerMime === 'application/pdf') return 'application/pdf';
+  if (ext === '.pdf') return 'application/pdf';
   if (
     lowerMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     ext === '.docx'
@@ -105,21 +106,136 @@ function cleanCode(str: any): string {
   return trimmed;
 }
 
-function resolveServerGeminiKey(): string {
-  const candidates = [
+function resolveServerGeminiKeys(): string[] {
+  const rawCandidates = [
     process.env.ASSET_WALLET_FINAL_PROJECT,
     process.env.GEMINI_API_KEY,
     process.env.GEMINI_API_KEY_ASSET_WALLET,
     process.env.GEMINI_API_KEY_ASSET_WALLET_2,
     process.env.API_KEY,
   ];
-  for (const c of candidates) {
-    if (c && c.trim()) return c.trim();
+  for (const envName of Object.keys(process.env)) {
+    const upper = envName.toUpperCase();
+    if (upper.includes('GEMINI') && upper.includes('KEY')) {
+      rawCandidates.push(process.env[envName]);
+    }
   }
-  const dynamicKey = Object.keys(process.env).find(
-    (k) => k.toUpperCase().includes('GEMINI') && k.toUpperCase().includes('KEY') && process.env[k]?.trim()
-  );
-  return dynamicKey ? process.env[dynamicKey]!.trim() : '';
+  const unique: string[] = [];
+  for (const c of rawCandidates) {
+    const trimmed = c?.trim();
+    if (trimmed && !unique.includes(trimmed)) {
+      unique.push(trimmed);
+    }
+  }
+  return unique;
+}
+
+const EXTRACTION_PROMPT = (filename?: string) =>
+  `Extract visible asset & document fields from "${filename || 'document'}" as a flat JSON object.
+Rules:
+- ALWAYS include: "category", "docType", "assetName".
+- OMIT any optional field that is not visible in the document (do NOT output empty strings or guess values).
+- Format all dates strictly as DD/MM/YYYY.
+- "category": one of "vehicular","electronics","camera","watch","appliances","health","identity","property","finance","furniture","jewellery","machinery","subscriptions","other"
+- "docType": one of "Vehicle Insurance","Vehicle Registration Certificate (RC)","Invoice","Receipt","Warranty Certificate","Extended Warranty","Service Record","User Manual","Property Document","Health Insurance","Bank / Investment Statement","Subscription / Membership","Other Document"
+- Optional fields (include ONLY when present): owner, vendor, manufacturer, model, purchasePrice (with currency symbol), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber, policyNumber, assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes (brief 1-2 sentence summary), addOns (string[]), reminders (string[]), contacts (string[]), registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
+
+async function extractWithGeminiKey(
+  apiKey: string,
+  parts: any[]
+): Promise<{ parsed: any; modelUsed: string }> {
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+      timeout: 15000,
+      retryOptions: {
+        attempts: 1,
+      },
+    },
+  });
+
+  const primaryController = new AbortController();
+  const backupController = new AbortController();
+  let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
+  let settled = false;
+
+  const invokeModel = async (
+    modelName: string,
+    thinkingLevel: ThinkingLevel,
+    signal: AbortSignal
+  ): Promise<{ parsed: any; modelUsed: string }> => {
+    const resObj = await ai.models.generateContent({
+      model: modelName,
+      contents: { parts },
+      config: {
+        abortSignal: signal,
+        thinkingConfig: { thinkingLevel },
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+      },
+    });
+    const raw = resObj?.text?.trim() || '';
+    if (!raw) {
+      throw new Error(`Empty response from ${modelName}`);
+    }
+    const parsed = JSON.parse(stripJsonCodeFences(raw));
+    return { parsed, modelUsed: modelName };
+  };
+
+  return new Promise<{ parsed: any; modelUsed: string }>((resolve, reject) => {
+    const errors: any[] = [];
+    let backupStarted = false;
+    let pendingCount = 1;
+
+    const finishSuccess = (result: { parsed: any; modelUsed: string }) => {
+      if (settled) return;
+      settled = true;
+      if (hedgeTimer) clearTimeout(hedgeTimer);
+      primaryController.abort();
+      backupController.abort();
+      resolve(result);
+    };
+
+    const handleFailure = (err: any, isPrimary: boolean) => {
+      if (settled) return;
+      errors.push(err);
+      pendingCount -= 1;
+
+      if (isPrimary && !backupStarted) {
+        if (hedgeTimer) clearTimeout(hedgeTimer);
+        startBackup();
+        return;
+      }
+
+      if (pendingCount <= 0 && backupStarted) {
+        settled = true;
+        if (hedgeTimer) clearTimeout(hedgeTimer);
+        reject(errors[0] || new Error('Gemini 3.8 document extraction failed.'));
+      }
+    };
+
+    const startBackup = () => {
+      if (settled || backupStarted) return;
+      backupStarted = true;
+      pendingCount += 1;
+      invokeModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL, backupController.signal)
+        .then(finishSuccess)
+        .catch((err) => handleFailure(err, false));
+    };
+
+    // Primary model: Gemini 3.8 Flash
+    invokeModel('gemini-3.8-flash', ThinkingLevel.LOW, primaryController.signal)
+      .then(finishSuccess)
+      .catch((err) => handleFailure(err, true));
+
+    // Hedged fast-failover if upstream gemini-3.8-flash experiences queuing (> 2.5s)
+    hedgeTimer = setTimeout(() => {
+      startBackup();
+    }, 2500);
+  });
 }
 
 export default async function handler(req: any, res: any) {
@@ -128,8 +244,8 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const apiKey = resolveServerGeminiKey();
-    if (!apiKey) {
+    const apiKeys = resolveServerGeminiKeys();
+    if (apiKeys.length === 0) {
       return res.status(500).json({
         success: false,
         error: 'Gemini API key (ASSET_WALLET_FINAL_PROJECT) is not configured in Vercel Environment Variables.',
@@ -183,158 +299,32 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-
-    const prompt = `Extract all visible asset and document details from "${filename || 'document'}" into JSON (use "" if not visible, never guess).
-1. category: one of "vehicular","electronics","camera","watch","appliances","health","identity","property","finance","furniture","jewellery","machinery","subscriptions","other"
-2. docType: one of "Vehicle Insurance","Vehicle Registration Certificate (RC)","Invoice","Receipt","Warranty Certificate","Extended Warranty","Service Record","User Manual","Property Document","Health Insurance","Bank / Investment Statement","Subscription / Membership","Other Document"
-3. Core fields (dates strictly DD/MM/YYYY): assetName, owner, vendor, manufacturer, model, purchasePrice (include currency), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber (serial/policy/folio/tag), assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes, addOns (string[]), reminders (string[]), contacts (string[]), rawText (concise key OCR lines, max 600 chars).
-4. Category fields if visible: registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
-
-    let textContent = prompt;
+    let textContent = EXTRACTION_PROMPT(filename);
     if (extractedText) {
-      textContent += `\n\n--- EXTRACTED DOCUMENT TEXT ---\n${extractedText.slice(0, 18000)}`;
+      textContent += `\n\n--- EXTRACTED DOCUMENT TEXT ---\n${extractedText.slice(0, 15000)}`;
     }
     parts.push({ text: textContent });
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
-
-    let responseText = '';
+    let data: any = null;
     let lastError: any = null;
 
-    const schemaConfig = {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          category: { type: Type.STRING },
-          docType: { type: Type.STRING },
-          assetName: { type: Type.STRING },
-          owner: { type: Type.STRING },
-          vendor: { type: Type.STRING },
-          manufacturer: { type: Type.STRING },
-          model: { type: Type.STRING },
-          purchasePrice: { type: Type.STRING },
-          purchaseDate: { type: Type.STRING },
-          expiryDate: { type: Type.STRING },
-          renewalDate: { type: Type.STRING },
-          warrantyEnds: { type: Type.STRING },
-          warrantyType: { type: Type.STRING },
-          warrantyStartDate: { type: Type.STRING },
-          serialNumber: { type: Type.STRING },
-          assetId: { type: Type.STRING },
-          expressServiceCode: { type: Type.STRING },
-          serviceTag: { type: Type.STRING },
-          supportPhone: { type: Type.STRING },
-          supportEmail: { type: Type.STRING },
-          coverageDetails: { type: Type.STRING },
-          invoice: { type: Type.STRING },
-          verificationUrl: { type: Type.STRING },
-          notes: { type: Type.STRING },
-          addOns: { type: Type.ARRAY, items: { type: Type.STRING } },
-          reminders: { type: Type.ARRAY, items: { type: Type.STRING } },
-          contacts: { type: Type.ARRAY, items: { type: Type.STRING } },
-          registrationNumber: { type: Type.STRING },
-          engineNumber: { type: Type.STRING },
-          chassisNumber: { type: Type.STRING },
-          vehicleType: { type: Type.STRING },
-          fuelType: { type: Type.STRING },
-          cubicCapacity: { type: Type.STRING },
-          registrationYear: { type: Type.STRING },
-          policyType: { type: Type.STRING },
-          coverageType: { type: Type.STRING },
-          idv: { type: Type.STRING },
-          ncbPercentage: { type: Type.STRING },
-          storageOrSpecs: { type: Type.STRING },
-          imeiOrMac: { type: Type.STRING },
-          lensDetails: { type: Type.STRING },
-          watchMovement: { type: Type.STRING },
-          propertyAddress: { type: Type.STRING },
-          deedNumber: { type: Type.STRING },
-          builtUpArea: { type: Type.STRING },
-          institutionName: { type: Type.STRING },
-          accountOrFolioNumber: { type: Type.STRING },
-          applianceType: { type: Type.STRING },
-          capacity: { type: Type.STRING },
-          energyRating: { type: Type.STRING },
-          material: { type: Type.STRING },
-          jewelleryType: { type: Type.STRING },
-          metalPurity: { type: Type.STRING },
-          grossWeightGrams: { type: Type.STRING },
-          subscriptionPlan: { type: Type.STRING },
-          billingCycle: { type: Type.STRING },
-          rawText: { type: Type.STRING },
-        },
-        required: ['category', 'docType', 'assetName'],
-      },
-    };
-
-    for (const modelName of candidateModels) {
+    for (const key of apiKeys) {
       try {
-        const resObj = await ai.models.generateContent({
-          model: modelName,
-          contents: { parts },
-          config: schemaConfig,
-        });
-        if (resObj && resObj.text) {
-          responseText = resObj.text;
-          break;
-        }
-      } catch (schemaErr: any) {
-        const errMsg = String(schemaErr?.message || schemaErr || '');
-        lastError = schemaErr;
-        const isSchemaRejection =
-          (errMsg.includes('400') || errMsg.toLowerCase().includes('schema')) &&
-          !errMsg.includes('404') &&
-          !errMsg.includes('429') &&
-          !errMsg.includes('503');
-
-        if (isSchemaRejection) {
-          try {
-            const fallbackRes = await ai.models.generateContent({
-              model: modelName,
-              contents: { parts },
-              config: {
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                responseMimeType: 'application/json',
-              },
-            });
-            if (fallbackRes && fallbackRes.text) {
-              responseText = fallbackRes.text;
-              break;
-            }
-          } catch (jsonErr: any) {
-            lastError = jsonErr;
-          }
-        }
+        const result = await extractWithGeminiKey(key, parts);
+        data = result.parsed;
+        break;
+      } catch (err: any) {
+        lastError = err;
       }
     }
 
-    if (!responseText) {
-      const rawErr = lastError?.message || '';
+    if (!data) {
+      const rawErr = String(lastError?.message || lastError || '');
       const userFriendlyErr =
         rawErr.includes('429') || rawErr.includes('RESOURCE_EXHAUSTED')
           ? 'Gemini API rate limit reached (429). Please wait a moment and try scanning again.'
-          : `Document scan error: ${rawErr || 'Both gemini-3.8-flash and gemini-3.6-flash failed to process this document.'}`;
+          : `Document scan error: ${rawErr || 'Gemini 3.8 failed to process this document.'}`;
       return res.status(502).json({ success: false, error: userFriendlyErr });
-    }
-
-    let data: any = {};
-    try {
-      data = JSON.parse(stripJsonCodeFences(responseText));
-    } catch {
-      return res.status(502).json({
-        success: false,
-        error: 'Received malformed JSON from document scanner. Please try scanning a clearer image or PDF.',
-      });
     }
 
     function cleanVal(v: any): string {

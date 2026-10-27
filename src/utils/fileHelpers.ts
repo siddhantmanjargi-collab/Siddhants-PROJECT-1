@@ -60,14 +60,14 @@ function optimizeImageDataUrl(
 
     const img = new Image();
     img.onload = () => {
-      const MAX_DIM = 1600;
+      const MAX_DIM = 1400;
       let { width, height } = img;
 
-      // Only downscale if larger than MAX_DIM or file is heavy (> 900KB)
+      // Downscale or compress if larger than MAX_DIM or file is > 350KB for faster OCR upload
       const rawB64 = dataUrl.includes(',') ? dataUrl.split(',')[1] || '' : dataUrl;
       const approxBytes = Math.round((rawB64.length * 3) / 4);
 
-      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 900 * 1024) {
+      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 350 * 1024) {
         resolve({
           dataUrl,
           mimeType: originalMime,
@@ -96,7 +96,7 @@ function optimizeImageDataUrl(
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
 
-      const compressedUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const compressedUrl = canvas.toDataURL('image/jpeg', 0.8);
       const compB64 = compressedUrl.split(',')[1] || '';
       resolve({
         dataUrl: compressedUrl,

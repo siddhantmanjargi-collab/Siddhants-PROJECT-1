@@ -92,7 +92,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     if (!videoRef.current) return;
     const rawW = videoRef.current.videoWidth || 1280;
     const rawH = videoRef.current.videoHeight || 720;
-    const MAX_DIM = 1600;
+    const MAX_DIM = 1400;
     const ratio = Math.min(1, MAX_DIM / rawW, MAX_DIM / rawH);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(rawW * ratio);
@@ -100,7 +100,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
       const rawB64 = dataUrl.split(',')[1] || '';
       setPreviewUrl(dataUrl);
       setBase64Data(rawB64);
@@ -129,17 +129,21 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
     setInlineNotice(null);
     setScanError(null);
     setStep('scanning');
-    setScanProgress(22);
-    setScanStatusMsg('Extracting document fields...');
+    setScanProgress(25);
+    setScanStatusMsg('Extracting document fields with Gemini 3.8...');
 
     const progressTimer = setInterval(() => {
-      setScanProgress((prev) => (prev < 92 ? prev + 14 : prev));
-    }, 300);
+      setScanProgress((prev) => (prev < 92 ? prev + 11 : prev));
+    }, 350);
+
+    const abortCtrl = new AbortController();
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 35000);
 
     try {
       const response = await fetch('/api/scan-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortCtrl.signal,
         body: JSON.stringify({
           mimeType,
           base64Data,
@@ -148,6 +152,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
         }),
       });
 
+      clearTimeout(timeoutId);
       clearInterval(progressTimer);
       setScanProgress(100);
 
@@ -169,8 +174,13 @@ export const ScanModal: React.FC<ScanModalProps> = ({ onClose, onSaveAsset }) =>
       setExtractedData(resData.data as ScanResultData);
       setStep('review');
     } catch (err: any) {
+      clearTimeout(timeoutId);
       clearInterval(progressTimer);
-      setScanError(err?.message || 'Network error while contacting the document scanner.');
+      if (err?.name === 'AbortError') {
+        setScanError('Document extraction timed out. Please try scanning a clearer photo or smaller PDF.');
+      } else {
+        setScanError(err?.message || 'Network error while contacting the document scanner.');
+      }
       setScanStatusMsg('Connection error');
     }
   };
