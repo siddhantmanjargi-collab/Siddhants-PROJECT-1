@@ -215,17 +215,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
 
   const capturePhoto = () => {
     if (!videoRef.current) return;
-    const rawW = videoRef.current.videoWidth || 1280;
-    const rawH = videoRef.current.videoHeight || 720;
-    const MAX_DIM = 1400;
+    const rawW = videoRef.current.videoWidth || 1920;
+    const rawH = videoRef.current.videoHeight || 1080;
+    const MAX_DIM = 2400;
     const ratio = Math.min(1, MAX_DIM / rawW, MAX_DIM / rawH);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(rawW * ratio);
     canvas.height = Math.round(rawH * ratio);
     const ctx = canvas.getContext('2d');
     if (ctx) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
       const rawB64 = dataUrl.split(',')[1] || '';
       setPreviewUrl(dataUrl);
       setBase64Data(rawB64);
@@ -247,14 +249,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     setScanError(null);
     setStep('scanning-doc');
     setScanProgress(25);
-    setScanStatusMsg('Reading document fields with Gemini 3.8...');
+    setScanStatusMsg('Reading all document fields, tables & fine print with Gemini OCR...');
 
     const progressTimer = setInterval(() => {
-      setScanProgress((prev) => (prev < 92 ? prev + 11 : prev));
-    }, 350);
+      setScanProgress((prev) => (prev < 92 ? prev + 9 : prev));
+    }, 400);
 
     const abortCtrl = new AbortController();
-    const timeoutId = setTimeout(() => abortCtrl.abort(), 35000);
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 45000);
 
     try {
       const response = await fetch('/api/scan-document', {

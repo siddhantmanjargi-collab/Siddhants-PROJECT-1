@@ -60,14 +60,14 @@ function optimizeImageDataUrl(
 
     const img = new Image();
     img.onload = () => {
-      const MAX_DIM = 1600;
+      const MAX_DIM = 2400;
       let { width, height } = img;
 
-      // Downscale or compress if larger than MAX_DIM or file is > 450KB for crisp, fast OCR upload
+      // Preserve original lossless bytes when <= 2400px and <= 1.2MB for razor-sharp fine-print OCR
       const rawB64 = dataUrl.includes(',') ? dataUrl.split(',')[1] || '' : dataUrl;
       const approxBytes = Math.round((rawB64.length * 3) / 4);
 
-      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 450 * 1024) {
+      if (width <= MAX_DIM && height <= MAX_DIM && approxBytes <= 1200 * 1024) {
         resolve({
           dataUrl,
           mimeType: originalMime,
@@ -91,17 +91,29 @@ function optimizeImageDataUrl(
         return;
       }
 
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
       // Fill white background in case of transparent PNG invoices
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
 
-      const compressedUrl = canvas.toDataURL('image/jpeg', 0.85);
-      const compB64 = compressedUrl.split(',')[1] || '';
+      let compressedUrl = canvas.toDataURL('image/jpeg', 0.92);
+      let compB64 = compressedUrl.split(',')[1] || '';
+      let compBytes = Math.round((compB64.length * 3) / 4);
+
+      // Ensure payload stays safely within serverless body limits (< 3.1MB)
+      if (compBytes > 3.1 * 1024 * 1024) {
+        compressedUrl = canvas.toDataURL('image/jpeg', 0.82);
+        compB64 = compressedUrl.split(',')[1] || '';
+        compBytes = Math.round((compB64.length * 3) / 4);
+      }
+
       resolve({
         dataUrl: compressedUrl,
         mimeType: 'image/jpeg',
-        sizeBytes: Math.round((compB64.length * 3) / 4),
+        sizeBytes: compBytes,
       });
     };
 

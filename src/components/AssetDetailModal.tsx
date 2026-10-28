@@ -232,6 +232,13 @@ export const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
                   </div>
                 )}
 
+                {asset.renewalDate && (
+                  <div>
+                    <span className="text-[#8FA79B] block">Renewal Due Date</span>
+                    <span className="text-[#E4C98A]">{formatDateDisplay(asset.renewalDate)}</span>
+                  </div>
+                )}
+
                 {asset.warrantyEnds && (
                   <div>
                     <span className="text-[#8FA79B] block">Warranty Expiration</span>
@@ -252,29 +259,105 @@ export const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
                     <span className="text-[#EDEDE1]">{asset.invoice}</span>
                   </div>
                 )}
+
+                {asset.verificationUrl && (
+                  <div className="col-span-1 sm:col-span-2">
+                    <span className="text-[#8FA79B] block">Verification / Portal URL</span>
+                    <span className="text-[#E4C98A] break-all">{asset.verificationUrl}</span>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Category Specific Fields */}
-            {asset.categoryFields && Object.values(asset.categoryFields).some(Boolean) && (
-              <div>
-                <h3 className="font-semibold text-sm text-[#C9A15D] mb-3">
-                  Additional Record Attributes
-                </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 py-3 border-b border-[#2A3B33] text-xs font-mono tabular-nums">
-                  {Object.entries(asset.categoryFields).map(([k, v]) =>
-                    v ? (
-                      <div key={k}>
-                        <span className="text-[#8FA79B] block capitalize">
-                          {k.replace(/([A-Z])/g, ' $1')}
-                        </span>
-                        <span className="text-[#EDEDE1]">{v}</span>
+            {/* Line Items Table (if extracted from invoice/policy) */}
+            {(() => {
+              const rawItems = asset.categoryFields?.__lineItemsJson;
+              if (!rawItems) return null;
+              let parsedItems: {
+                description: string;
+                quantity?: string;
+                unitPrice?: string;
+                amount?: string;
+              }[] = [];
+              try {
+                const candidate = JSON.parse(rawItems);
+                if (Array.isArray(candidate)) parsedItems = candidate;
+              } catch {
+                return null;
+              }
+              if (parsedItems.length === 0) return null;
+
+              return (
+                <div>
+                  <h3 className="font-semibold text-sm text-[#C9A15D] mb-2.5">
+                    Itemized Breakdown
+                  </h3>
+                  <div className="bg-[#1C2E26] border border-[#2A3B33] rounded-xl overflow-hidden divide-y divide-[#2A3B33] text-xs font-mono">
+                    {parsedItems.map((item, idx) => (
+                      <div
+                        key={idx}
+                        className="px-3.5 py-2.5 flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0">
+                          <span className="text-[#EDEDE1] block break-words">
+                            {item.description}
+                          </span>
+                          {(item.quantity || item.unitPrice) && (
+                            <span className="text-[11px] text-[#8FA79B]">
+                              {item.quantity ? `Qty: ${item.quantity}` : ''}
+                              {item.quantity && item.unitPrice ? ' · ' : ''}
+                              {item.unitPrice ? `Unit: ${item.unitPrice}` : ''}
+                            </span>
+                          )}
+                        </div>
+                        {item.amount && (
+                          <span className="text-[#E4C98A] font-semibold tabular-nums shrink-0">
+                            {item.amount}
+                          </span>
+                        )}
                       </div>
-                    ) : null
-                  )}
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
+
+            {/* Category & Document Specific Fields */}
+            {asset.categoryFields &&
+              Object.entries(asset.categoryFields).some(
+                ([k, v]) =>
+                  Boolean(v) &&
+                  k !== '__lineItemsJson' &&
+                  k !== 'renewalDate' &&
+                  k !== 'verificationUrl'
+              ) && (
+                <div>
+                  <h3 className="font-semibold text-sm text-[#C9A15D] mb-3">
+                    Extracted Document Details
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 py-3 border-b border-[#2A3B33] text-xs font-mono tabular-nums">
+                    {Object.entries(asset.categoryFields).map(([k, v]) => {
+                      if (
+                        !v ||
+                        k === '__lineItemsJson' ||
+                        k === 'renewalDate' ||
+                        k === 'verificationUrl'
+                      ) {
+                        return null;
+                      }
+                      const cleanLabel = k.startsWith('detail__')
+                        ? k.slice('detail__'.length)
+                        : k.replace(/([A-Z])/g, ' $1');
+                      return (
+                        <div key={k} className="break-words">
+                          <span className="text-[#8FA79B] block capitalize">{cleanLabel}</span>
+                          <span className="text-[#EDEDE1]">{v}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
             {/* AddOns */}
             {asset.addOns && asset.addOns.length > 0 && (

@@ -1,6 +1,6 @@
 import path from 'path';
 import zlib from 'zlib';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, MediaResolution, ThinkingLevel } from '@google/genai';
 
 const GEMINI_INLINE_MIME_TYPES = new Set([
   'image/jpeg',
@@ -36,7 +36,26 @@ function extractDocxText(base64Str: string): string {
   try {
     const buf = Buffer.from(base64Str, 'base64');
     let offset = 0;
-    const chunks: string[] = [];
+    const headerChunks: string[] = [];
+    const bodyChunks: string[] = [];
+    const footerChunks: string[] = [];
+
+    const cleanWordXml = (xml: string) =>
+      xml
+        .replace(/<\/w:tr>/g, '\n')
+        .replace(/<\/w:tc>/g, ' | ')
+        .replace(/<\/w:p>/g, '\n')
+        .replace(/<w:tab\/>/g, '\t')
+        .replace(/<w:br[^>]*\/>/g, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/\s+\n/g, '\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
 
     while (offset + 30 <= buf.length) {
       const sig = buf.readUInt32LE(offset);
@@ -52,29 +71,35 @@ function extractDocxText(base64Str: string): string {
       const dataStart = offset + 30 + nameLen + extraLen;
       const dataEnd = dataStart + compSize;
 
-      if (entryName === 'word/document.xml' && dataEnd <= buf.length && compSize > 0) {
-        const rawSlice = buf.subarray(dataStart, dataEnd);
-        let xmlStr = '';
-        if (compression === 0) {
-          xmlStr = rawSlice.toString('utf-8');
-        } else if (compression === 8) {
-          xmlStr = zlib.inflateRawSync(rawSlice).toString('utf-8');
+      const isWordXml =
+        entryName === 'word/document.xml' ||
+        /^word\/header\d*\.xml$/i.test(entryName) ||
+        /^word\/footer\d*\.xml$/i.test(entryName);
+
+      if (isWordXml && dataEnd <= buf.length && compSize > 0) {
+        try {
+          const rawSlice = buf.subarray(dataStart, dataEnd);
+          const xmlBuf =
+            compression === 8
+              ? zlib.inflateRawSync(rawSlice)
+              : compression === 0
+              ? rawSlice
+              : null;
+          if (xmlBuf) {
+            const text = cleanWordXml(xmlBuf.toString('utf-8'));
+            if (text) {
+              if (entryName.includes('header')) headerChunks.push(text);
+              else if (entryName.includes('footer')) footerChunks.push(text);
+              else bodyChunks.push(text);
+            }
+          }
+        } catch {
+          // Ignore corrupt zip entry
         }
-        if (xmlStr) {
-          const text = xmlStr
-            .replace(/<\/w:p>/g, '\n')
-            .replace(/<w:tab\/>/g, '\t')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+\n/g, '\n')
-            .replace(/[ \t]{2,}/g, ' ')
-            .trim();
-          chunks.push(text);
-        }
-        break;
       }
       offset = dataEnd > offset ? dataEnd : offset + 1;
     }
-    return chunks.join('\n').trim();
+    return [...headerChunks, ...bodyChunks, ...footerChunks].join('\n\n').trim();
   } catch {
     return '';
   }
@@ -123,7 +148,7 @@ function cleanCode(str: any): string {
   const upper = trimmed.toUpperCase();
   const invalidWords = [
     'NUMBER', 'NO', 'NO.', 'NUM', 'NA', 'N/A', 'NONE', 'NULL', 'UNDEFINED', 'NIL',
-    'NOT AVAILABLE', 'UNKNOWN', 'TBD', 'PENDING', 'NOT APPLICABLE',
+    'NOT AVAILABLE', 'NOT PROVIDED', 'UNKNOWN', 'TBD', 'PENDING', 'NOT APPLICABLE',
     'REGISTRATION NUMBER', 'ENGINE NUMBER', 'CHASSIS NUMBER', 'POLICY NUMBER',
     'SERIAL NUMBER', 'VIN NUMBER', 'INVOICE NUMBER', 'TRANSACTION ID', 'REF NUMBER'
   ];
@@ -156,16 +181,68 @@ function resolveServerGeminiKeys(): string[] {
   return unique;
 }
 
+const OCR_SYSTEM_INSTRUCTION = `You are a forensic-grade optical character recognition (OCR) and structured document intelligence engine for an Asset & Document Vault.
+Your mandate is 100% exhaustive reading accuracy:
+1. Inspect EVERY region of every page: top headers, company letterheads, logos, customer/billing/shipping blocks, multi-column tables, line items, tax breakdowns (GST/CGST/SGST/IGST/VAT), serial/IMEI/chassis/engine/policy/folio/invoice/order codes, stamps, seals, footnotes, helpline contacts, and fine print.
+2. Read alphanumeric identifiers character-by-character with zero transposition (carefully distinguish 0 vs O, 1 vs I vs l, 5 vs S, 8 vs B, 2 vs Z).
+3. Never fabricate, guess, or invent dates, numbers, coverage details, or contacts that are not present in the document.
+4. Capture EVERY visible fact: map standard fields to their exact schema keys, place itemized rows in "lineItems", and place any remaining document-specific key-value pairs in "additionalDetails" so zero information on the document is ever lost.`;
+
 const EXTRACTION_PROMPT = (filename?: string) =>
-  `Perform accurate OCR and structured asset extraction on "${filename || 'document'}". Return ONLY a flat JSON object (never an array).
-Rules:
-- ALWAYS include: "category", "docType", "assetName", "rawText".
-- "rawText": clean verbatim OCR transcription of the key visible text, dates, numbers, line items, and identifiers on the document (up to 2500 characters, newline-separated).
-- OMIT any optional field that is not visible in the document (do NOT output empty strings or fabricate values).
-- Format all dates strictly as DD/MM/YYYY. Distinguish "expiryDate", "warrantyEnds", and "renewalDate" accurately from the text.
-- "category": one of "vehicular","electronics","camera","watch","appliances","health","identity","property","finance","furniture","jewellery","machinery","subscriptions","other"
-- "docType": one of "Vehicle Insurance","Vehicle Registration Certificate (RC)","Invoice","Receipt","Warranty Certificate","Extended Warranty","Service Record","User Manual","Property Document","Health Insurance","Bank / Investment Statement","Subscription / Membership","Other Document"
-- Optional fields (include ONLY when visible): owner, vendor, manufacturer, model, purchasePrice (include currency symbol), purchaseDate, expiryDate, renewalDate, warrantyType, warrantyStartDate, warrantyEnds, serialNumber, policyNumber, assetId, expressServiceCode, serviceTag, supportPhone, supportEmail, coverageDetails, invoice, verificationUrl, notes (concise 1-2 sentence summary), addOns (string[]), reminders (string[]), contacts (string[]), registrationNumber, engineNumber, chassisNumber, vehicleType, fuelType, cubicCapacity, registrationYear, policyType, coverageType, idv, ncbPercentage, storageOrSpecs, imeiOrMac, lensDetails, watchMovement, propertyAddress, deedNumber, builtUpArea, institutionName, accountOrFolioNumber, applianceType, capacity, energyRating, material, jewelleryType, metalPurity, grossWeightGrams, subscriptionPlan, billingCycle.`;
+  `Perform exhaustive, high-precision OCR and complete structured extraction on "${filename || 'document'}".
+Return ONLY a single flat JSON object (never an array, never markdown fences).
+
+REQUIRED CORE KEYS:
+- "category": strictly one of "vehicular" | "electronics" | "camera" | "watch" | "appliances" | "health" | "identity" | "property" | "finance" | "furniture" | "jewellery" | "machinery" | "subscriptions" | "other"
+- "docType": strictly one of "Vehicle Insurance" | "Vehicle Registration Certificate (RC)" | "Invoice" | "Receipt" | "Warranty Certificate" | "Extended Warranty" | "Service Record" | "User Manual" | "Property Document" | "Health Insurance" | "Bank / Investment Statement" | "Subscription / Membership" | "Other Document"
+- "assetName": full specific asset or policy title (e.g., "Apple MacBook Pro 14-inch (M3 Pro)" or "Maruti Suzuki Baleno Alpha - Comprehensive Motor Policy", never generic words like "Invoice")
+- "pagesProcessed": integer count of pages read
+- "rawText": complete, faithful verbatim OCR transcription of ALL readable text on the document from top to bottom (headers, addresses, all table rows, codes, totals, terms, stamps, footers — up to 15000 characters, newline-separated).
+
+STRUCTURED ASSET FIELDS (include EVERY field that appears anywhere on the document; omit only if genuinely absent):
+- Identity & Parties:
+  "owner" (buyer / insured / policyholder / registered owner / account holder full name),
+  "customerAddress" (full billing/shipping/registered address of owner/customer),
+  "vendor" (seller / dealer / store / insurer / issuing authority name),
+  "vendorAddress" (seller / branch / issuer address),
+  "vendorTaxId" (seller GSTIN / VAT / Tax ID / CIN / IRDAI Reg No.),
+  "customerTaxId" (buyer GSTIN / PAN / Tax ID if printed),
+  "manufacturer" (brand / make, e.g., Apple, Dell, Maruti Suzuki, Samsung, Tanishq),
+  "model" (exact model / variant / part number / SKU).
+- Financials & Dates (format ALL dates strictly as DD/MM/YYYY):
+  "purchasePrice" (grand total / total premium / net amount paid WITH currency symbol, e.g., "₹ 1,64,900.00" or "$1,299.00"),
+  "subtotalAmount" (taxable value / base amount / own-damage + TP base premium before tax, with currency),
+  "taxAmount" (total GST / CGST+SGST / IGST / VAT / tax amount with currency and rate if shown),
+  "discountAmount" (discount / trade-in / NCB discount amount if shown),
+  "paymentMethod" (e.g., UPI, Credit Card, Net Banking, EMI, Cash, Cheque, Transaction Ref),
+  "paymentStatus" (e.g., Paid, Active, Financed, Due),
+  "purchaseDate" (invoice date / policy issue or start date / registration date in DD/MM/YYYY),
+  "expiryDate" (policy expiry date / validity end date / RC fitness expiry / subscription end date in DD/MM/YYYY),
+  "renewalDate" (explicit renewal due date / next premium due date in DD/MM/YYYY — ONLY if stated),
+  "warrantyStartDate" (warranty start date in DD/MM/YYYY),
+  "warrantyEnds" (warranty expiration date in DD/MM/YYYY — calculate ONLY if document explicitly states purchase/start date + exact warranty duration like "1 Year Warranty" or prints the end date),
+  "warrantyType" (exact warranty tier/entitlement, e.g., "1 Year Apple Limited Warranty", "3 Years Onsite ProSupport").
+- Primary Identifiers (DO NOT copy a serial number into policyNumber or vice versa — put each code in its true field):
+  "serialNumber" (device/product serial number),
+  "policyNumber" (insurance policy number / certificate number),
+  "invoice" (invoice / bill / receipt number),
+  "orderNumber" (order ID / booking ID / reference number / challan number),
+  "assetId" (asset tag / system ID / passport No / Aadhaar / PAN / DL / UID / membership ID),
+  "serviceTag" (service tag / PSN),
+  "expressServiceCode" (express service code),
+  "imeiOrMac" (IMEI 1 / IMEI 2 / MAC address / EID),
+  "verificationUrl" (any portal URL / QR verification URL / claim or warranty lookup website).
+- Domain-Specific Fields (include whenever visible):
+  Vehicular: "registrationNumber", "engineNumber", "chassisNumber" (full VIN/chassis), "vehicleType", "fuelType", "cubicCapacity", "registrationYear", "vehicleColor", "seatingCapacity", "rtoLocation", "hypothecation" (financier/bank name), "pucExpiryDate" (DD/MM/YYYY), "odometerReading", "policyType" (Comprehensive / Standalone OD / Third Party), "coverageType", "idv" (Insured Declared Value with currency), "ncbPercentage" (No Claim Bonus %), "deductibleAmount", "nomineeName", "tpaName".
+  Electronics / Camera / Watch / Appliances / Furniture / Machinery: "storageOrSpecs" (CPU, RAM, SSD, display, color, configuration), "coverageDetails", "lensDetails", "watchMovement", "applianceType", "capacity", "energyRating", "material".
+  Property / Finance / Jewellery / Subscriptions: "propertyAddress", "deedNumber", "builtUpArea", "institutionName", "accountOrFolioNumber", "ifscOrBranch", "jewelleryType", "metalPurity" (e.g., 22K / 18K / 916 / 999), "grossWeightGrams" (include net/stone weight details if shown), "subscriptionPlan", "billingCycle".
+- Rich Arrays & Detailed Summary:
+  "lineItems": array of {"description": string, "quantity"?: string, "unitPrice"?: string, "amount"?: string} for every product, part, service charge, or premium component row in any table on the document.
+  "additionalDetails": array of {"label": string, "value": string} capturing EVERY OTHER visible field, number, code, HSN/SAC, tax rate, place of supply, salesperson, delivery date, member covered, hospital network, waiting period, hallmark HUID, making charges, or metadata printed on the document that is not already in the fields above.
+  "addOns": string[] of all add-on covers, riders, included accessories, bundled services, or benefits (e.g., "Zero Depreciation", "Engine & Gearbox Protect", "24x7 Roadside Assistance", "Free Installation").
+  "contacts": string[] of ALL phone numbers, toll-free helplines, customer care emails, claim emails, and support websites printed on the document (format clearly like "Customer Care: 1800-123-4567", "Claims Email: care@insurer.com"). Also populate "supportPhone" and "supportEmail" with the primary phone and email.
+  "reminders": string[] of actionable date-bound reminders derived strictly from dates/intervals printed on the document (e.g., "Policy expires on 14/08/2026 — renew before midnight", "Next service due at 10,000 km").
+  "notes": thorough, comprehensive summary (3–6 sentences) of key terms, conditions, exclusions, warranty rules, tax/payment summary, and important highlights written on the document.`;
 
 async function extractWithGeminiKey(
   apiKey: string,
@@ -206,8 +283,11 @@ async function extractWithGeminiKey(
       contents: { parts },
       config: {
         abortSignal: signal,
+        systemInstruction: OCR_SYSTEM_INSTRUCTION,
+        mediaResolution: MediaResolution.MEDIA_RESOLUTION_HIGH,
         thinkingConfig: { thinkingLevel },
         responseMimeType: 'application/json',
+        maxOutputTokens: 8192,
         temperature: 0.1,
       },
     });
@@ -255,22 +335,22 @@ async function extractWithGeminiKey(
       if (settled || backupStarted) return;
       backupStarted = true;
       pendingCount += 1;
-      backupDeadlineTimer = setTimeout(() => backupController.abort(), 32000);
-      invokeModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL, backupController.signal)
+      backupDeadlineTimer = setTimeout(() => backupController.abort(), 38000);
+      invokeModel('gemini-3.1-flash-lite', ThinkingLevel.LOW, backupController.signal)
         .then(finishSuccess)
         .catch((err) => handleFailure(err, false));
     };
 
-    // Primary model: Gemini 3.8 Flash
-    primaryDeadlineTimer = setTimeout(() => primaryController.abort(), 28000);
+    // Primary model: Gemini 3.8 Flash with High Media Resolution
+    primaryDeadlineTimer = setTimeout(() => primaryController.abort(), 36000);
     invokeModel('gemini-3.8-flash', ThinkingLevel.LOW, primaryController.signal)
       .then(finishSuccess)
       .catch((err) => handleFailure(err, true));
 
-    // Hedged fast-failover if upstream gemini-3.8-flash queues (> 1.8s)
+    // Hedged fast-failover if upstream gemini-3.8-flash queues (> 3.2s)
     hedgeTimer = setTimeout(() => {
       startBackup();
-    }, 1800);
+    }, 3200);
   });
 }
 
@@ -356,7 +436,7 @@ export default async function handler(req: any, res: any) {
 
     let textContent = EXTRACTION_PROMPT(filename);
     if (extractedText) {
-      textContent += `\n\n--- EXTRACTED DOCUMENT TEXT ---\n${extractedText.slice(0, 15000)}`;
+      textContent += `\n\n--- EXTRACTED DOCUMENT TEXT ---\n${extractedText.slice(0, 30000)}`;
     }
     parts.push({ text: textContent });
 
@@ -389,7 +469,7 @@ export default async function handler(req: any, res: any) {
       if (typeof v === 'number' || typeof v === 'boolean') return String(v);
       if (typeof v !== 'string') return '';
       const s = v.trim();
-      if (['null', 'undefined', 'n/a', 'none'].includes(s.toLowerCase())) return '';
+      if (['null', 'undefined', 'n/a', 'none', 'not provided', 'not available'].includes(s.toLowerCase())) return '';
       return s;
     }
 
@@ -399,12 +479,12 @@ export default async function handler(req: any, res: any) {
       if (c.includes('vehicle') || c.includes('car') || c.includes('bike') || c.includes('auto') || c.includes('vehicular') || c.includes('motor')) return 'vehicular';
       if (c.includes('camera') || c.includes('optic') || c.includes('lens')) return 'camera';
       if (c.includes('watch') || c.includes('timepiece') || c.includes('wearable')) return 'watch';
-      if (c.includes('laptop') || c.includes('phone') || c.includes('electronic') || c.includes('gadget') || c.includes('computer')) return 'electronics';
-      if (c.includes('appliance') || c.includes('home appliance')) return 'appliances';
+      if (c.includes('laptop') || c.includes('phone') || c.includes('electronic') || c.includes('gadget') || c.includes('computer') || c.includes('tablet') || c.includes('audio')) return 'electronics';
+      if (c.includes('appliance') || c.includes('home appliance') || c.includes('refrigerator') || c.includes('washing') || c.includes('air conditioner')) return 'appliances';
       if (c.includes('health') || c.includes('medical') || c.includes('hospital') || c.includes('doctor') || c.includes('mediclaim')) return 'health';
       if (c.includes('identity') || c.includes('passport') || c.includes('aadhaar') || c.includes('pan') || c.includes('id card') || c.includes('license') || c.includes('licence')) return 'identity';
-      if (c.includes('property') || c.includes('real estate') || c.includes('house') || c.includes('land')) return 'property';
-      if (c.includes('financial') || c.includes('finance') || c.includes('bank') || c.includes('investment')) return 'finance';
+      if (c.includes('property') || c.includes('real estate') || c.includes('house') || c.includes('land') || c.includes('apartment')) return 'property';
+      if (c.includes('financial') || c.includes('finance') || c.includes('bank') || c.includes('investment') || c.includes('mutual fund') || c.includes('deposit')) return 'finance';
       if (c.includes('furniture')) return 'furniture';
       if (c.includes('jewel') || c.includes('gold') || c.includes('silver') || c.includes('diamond')) return 'jewellery';
       if (c.includes('machinery') || c.includes('equipment')) return 'machinery';
@@ -417,16 +497,16 @@ export default async function handler(req: any, res: any) {
       const d = dt.trim().toLowerCase();
       if (d.includes('rc') || d.includes('registration certificate')) return 'Vehicle Registration Certificate (RC)';
       if (d.includes('vehicle insurance') || (d.includes('motor') && d.includes('insurance'))) return 'Vehicle Insurance';
-      if (d.includes('health insurance') || d.includes('medical')) return 'Health Insurance';
-      if (d.includes('extended warranty')) return 'Extended Warranty';
-      if (d.includes('warranty')) return 'Warranty Certificate';
-      if (d.includes('invoice')) return 'Invoice';
-      if (d.includes('receipt')) return 'Receipt';
-      if (d.includes('service') || d.includes('maintenance')) return 'Service Record';
-      if (d.includes('manual')) return 'User Manual';
-      if (d.includes('property') || d.includes('deed')) return 'Property Document';
+      if (d.includes('health insurance') || d.includes('medical') || d.includes('mediclaim')) return 'Health Insurance';
+      if (d.includes('extended warranty') || d.includes('applecare') || d.includes('care+')) return 'Extended Warranty';
+      if (d.includes('warranty') || d.includes('guarantee')) return 'Warranty Certificate';
+      if (d.includes('invoice') || d.includes('tax bill') || d.includes('bill of supply')) return 'Invoice';
+      if (d.includes('receipt') || d.includes('payment confirmation')) return 'Receipt';
+      if (d.includes('service') || d.includes('maintenance') || d.includes('job card')) return 'Service Record';
+      if (d.includes('manual') || d.includes('guide')) return 'User Manual';
+      if (d.includes('property') || d.includes('deed') || d.includes('sale agreement')) return 'Property Document';
       if (d.includes('subscription') || d.includes('membership')) return 'Subscription / Membership';
-      if (d.includes('bank') || d.includes('statement')) return 'Bank / Investment Statement';
+      if (d.includes('bank') || d.includes('statement') || d.includes('folio') || d.includes('deposit')) return 'Bank / Investment Statement';
       return 'Other Document';
     }
 
@@ -436,7 +516,7 @@ export default async function handler(req: any, res: any) {
     const contactsArr = Array.isArray(data.contacts)
       ? data.contacts.map(cleanVal).filter(Boolean)
       : data.contacts
-      ? [cleanVal(data.contacts)]
+      ? [cleanVal(data.contacts)].filter(Boolean)
       : [];
     const phoneVal = cleanVal(data.supportPhone);
     if (phoneVal && !contactsArr.some((c: string) => c.includes(phoneVal))) {
@@ -447,11 +527,99 @@ export default async function handler(req: any, res: any) {
       contactsArr.push(`Support Email: ${emailVal}`);
     }
 
+    const rawLineItems = Array.isArray(data.lineItems)
+      ? data.lineItems
+          .map((item: any) => {
+            if (!item || typeof item !== 'object') return null;
+            const description = cleanVal(item.description || item.name || item.item);
+            const quantity = cleanVal(item.quantity || item.qty);
+            const unitPrice = cleanVal(item.unitPrice || item.rate || item.price);
+            const amount = cleanVal(item.amount || item.total);
+            if (!description && !amount) return null;
+            return {
+              description: description || 'Item',
+              ...(quantity ? { quantity } : {}),
+              ...(unitPrice ? { unitPrice } : {}),
+              ...(amount ? { amount } : {}),
+            };
+          })
+          .filter(Boolean)
+      : [];
+
+    const knownKeys = new Set([
+      'category', 'docType', 'assetName', 'owner', 'vendor', 'manufacturer', 'model',
+      'purchasePrice', 'purchaseDate', 'expiryDate', 'renewalDate', 'warrantyEnds',
+      'warrantyType', 'warrantyStartDate', 'serialNumber', 'policyNumber', 'invoice',
+      'orderNumber', 'verificationUrl', 'notes', 'addOns', 'reminders', 'contacts',
+      'lineItems', 'additionalDetails', 'customerAddress', 'vendorAddress', 'vendorTaxId',
+      'customerTaxId', 'paymentMethod', 'paymentStatus', 'subtotalAmount', 'taxAmount',
+      'discountAmount', 'nomineeName', 'tpaName', 'deductibleAmount', 'hypothecation',
+      'pucExpiryDate', 'odometerReading', 'vehicleColor', 'seatingCapacity', 'rtoLocation',
+      'ifscOrBranch', 'registrationNumber', 'engineNumber', 'chassisNumber', 'vehicleType',
+      'fuelType', 'cubicCapacity', 'registrationYear', 'policyType', 'coverageType',
+      'idv', 'ncbPercentage', 'serviceTag', 'expressServiceCode', 'assetId', 'supportPhone',
+      'supportEmail', 'coverageDetails', 'storageOrSpecs', 'imeiOrMac', 'lensDetails',
+      'watchMovement', 'propertyAddress', 'deedNumber', 'builtUpArea', 'institutionName',
+      'accountOrFolioNumber', 'applianceType', 'capacity', 'energyRating', 'material',
+      'jewelleryType', 'metalPurity', 'grossWeightGrams', 'subscriptionPlan', 'billingCycle',
+      'rawText', 'pagesProcessed', 'documentClassification', 'assetCategory'
+    ]);
+
+    const additionalDetailsArr: { label: string; value: string }[] = [];
+    const seenLabels = new Set<string>();
+
+    const pushAdditional = (rawLabel: string, rawValue: any) => {
+      const label = cleanVal(rawLabel);
+      const value = cleanVal(rawValue);
+      if (!label || !value) return;
+      const norm = label.toLowerCase();
+      if (seenLabels.has(norm)) return;
+      seenLabels.add(norm);
+      additionalDetailsArr.push({ label, value });
+    };
+
+    if (Array.isArray(data.additionalDetails)) {
+      for (const entry of data.additionalDetails) {
+        if (entry && typeof entry === 'object') {
+          pushAdditional(entry.label || entry.key || entry.name, entry.value || entry.val);
+        }
+      }
+    } else if (data.additionalDetails && typeof data.additionalDetails === 'object') {
+      for (const [k, v] of Object.entries(data.additionalDetails)) {
+        pushAdditional(k, v);
+      }
+    }
+
+    for (const [k, v] of Object.entries(data)) {
+      if (knownKeys.has(k)) continue;
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        const prettyLabel = k
+          .replace(/_/g, ' ')
+          .replace(/([A-Z])/g, ' $1')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/^./, (c) => c.toUpperCase());
+        pushAdditional(prettyLabel, v);
+      }
+    }
+
+    const pureSerial = cleanCode(data.serialNumber);
+    const purePolicy = cleanCode(data.policyNumber);
+    const pureServiceTag = cleanCode(data.serviceTag);
+    const pureAssetId = cleanCode(data.assetId);
+    const pureFolio = cleanCode(data.accountOrFolioNumber);
+    const primaryIdentifier =
+      pureSerial || purePolicy || pureServiceTag || pureAssetId || pureFolio || cleanCode(data.registrationNumber);
+
     const sanitizedData = {
       modelUsed: usedModel,
       category: mappedCategory,
       docType: mappedDocType,
-      assetName: cleanVal(data.assetName) || cleanVal(data.model) || filename?.replace(/\.[^/.]+$/, '') || 'Scanned Asset',
+      assetName:
+        cleanVal(data.assetName) ||
+        [cleanVal(data.manufacturer), cleanVal(data.model)].filter(Boolean).join(' ') ||
+        filename?.replace(/\.[^/.]+$/, '') ||
+        'Scanned Asset',
       owner: cleanVal(data.owner),
       vendor: cleanVal(data.vendor),
       manufacturer: cleanVal(data.manufacturer),
@@ -463,14 +631,36 @@ export default async function handler(req: any, res: any) {
       warrantyEnds: cleanVal(data.warrantyEnds),
       warrantyType: cleanVal(data.warrantyType),
       warrantyStartDate: cleanVal(data.warrantyStartDate || data.purchaseDate),
-      serialNumber: cleanCode(data.serialNumber || data.serviceTag || data.assetId || data.policyNumber || data.accountOrFolioNumber),
-      policyNumber: cleanCode(data.policyNumber || data.serialNumber),
+      serialNumber: primaryIdentifier,
+      policyNumber: purePolicy,
       invoice: cleanCode(data.invoice),
+      orderNumber: cleanCode(data.orderNumber),
       verificationUrl: cleanVal(data.verificationUrl),
       notes: cleanVal(data.notes),
-      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : data.addOns ? [cleanVal(data.addOns)] : [],
-      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : data.reminders ? [cleanVal(data.reminders)] : [],
+      addOns: Array.isArray(data.addOns) ? data.addOns.map(cleanVal).filter(Boolean) : data.addOns ? [cleanVal(data.addOns)].filter(Boolean) : [],
+      reminders: Array.isArray(data.reminders) ? data.reminders.map(cleanVal).filter(Boolean) : data.reminders ? [cleanVal(data.reminders)].filter(Boolean) : [],
       contacts: contactsArr,
+      lineItems: rawLineItems,
+      additionalDetails: additionalDetailsArr,
+      customerAddress: cleanVal(data.customerAddress),
+      vendorAddress: cleanVal(data.vendorAddress),
+      vendorTaxId: cleanCode(data.vendorTaxId),
+      customerTaxId: cleanCode(data.customerTaxId),
+      paymentMethod: cleanVal(data.paymentMethod),
+      paymentStatus: cleanVal(data.paymentStatus),
+      subtotalAmount: cleanVal(data.subtotalAmount),
+      taxAmount: cleanVal(data.taxAmount),
+      discountAmount: cleanVal(data.discountAmount),
+      nomineeName: cleanVal(data.nomineeName),
+      tpaName: cleanVal(data.tpaName),
+      deductibleAmount: cleanVal(data.deductibleAmount),
+      hypothecation: cleanVal(data.hypothecation),
+      pucExpiryDate: cleanVal(data.pucExpiryDate),
+      odometerReading: cleanVal(data.odometerReading),
+      vehicleColor: cleanVal(data.vehicleColor),
+      seatingCapacity: cleanVal(data.seatingCapacity),
+      rtoLocation: cleanVal(data.rtoLocation),
+      ifscOrBranch: cleanVal(data.ifscOrBranch),
       registrationNumber: cleanCode(data.registrationNumber),
       engineNumber: cleanCode(data.engineNumber),
       chassisNumber: cleanCode(data.chassisNumber),
@@ -482,9 +672,9 @@ export default async function handler(req: any, res: any) {
       coverageType: cleanVal(data.coverageType),
       idv: cleanVal(data.idv),
       ncbPercentage: cleanVal(data.ncbPercentage),
-      serviceTag: cleanCode(data.serviceTag || data.serialNumber),
+      serviceTag: pureServiceTag,
       expressServiceCode: cleanCode(data.expressServiceCode),
-      assetId: cleanCode(data.assetId),
+      assetId: pureAssetId,
       supportPhone: phoneVal,
       supportEmail: emailVal,
       coverageDetails: cleanVal(data.coverageDetails || data.coverageType),
@@ -496,7 +686,7 @@ export default async function handler(req: any, res: any) {
       deedNumber: cleanCode(data.deedNumber),
       builtUpArea: cleanVal(data.builtUpArea),
       institutionName: cleanVal(data.institutionName),
-      accountOrFolioNumber: cleanCode(data.accountOrFolioNumber),
+      accountOrFolioNumber: pureFolio,
       applianceType: cleanVal(data.applianceType),
       capacity: cleanVal(data.capacity),
       energyRating: cleanVal(data.energyRating),
@@ -509,7 +699,7 @@ export default async function handler(req: any, res: any) {
       rawText: cleanVal(data.rawText) || extractedText || '',
       documentClassification: { docType: mappedDocType, confidence: 0.98 },
       assetCategory: { category: mappedCategory, confidence: 0.98 },
-      pagesProcessed: 1,
+      pagesProcessed: Number(data.pagesProcessed) > 0 ? Number(data.pagesProcessed) : 1,
     };
 
     return res.status(200).json({ success: true, data: sanitizedData });

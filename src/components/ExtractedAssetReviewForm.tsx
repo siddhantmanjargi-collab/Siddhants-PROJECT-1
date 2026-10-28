@@ -24,6 +24,8 @@ import {
   AssetCategory,
   DocumentAttachment,
   DocumentType,
+  ExtractedKeyValue,
+  ExtractedLineItem,
   ScanResultData
 } from '../types/asset';
 import { DocumentViewerModal } from './DocumentViewerModal';
@@ -105,7 +107,88 @@ const CATEGORY_SPECIFIC_KEYS: Record<AssetCategory, { key: string; label: string
   ],
 };
 
+const FIELD_LABELS: Record<string, string> = {
+  policyNumber: 'Policy / Certificate Number',
+  orderNumber: 'Order / Booking / Ref ID',
+  subtotalAmount: 'Subtotal / Base Amount',
+  taxAmount: 'Tax / GST Breakdown',
+  discountAmount: 'Discount / NCB Deduction',
+  paymentMethod: 'Payment Method / Ref',
+  paymentStatus: 'Payment Status',
+  customerAddress: 'Customer / Billing Address',
+  vendorAddress: 'Vendor / Issuer Address',
+  vendorTaxId: 'Seller GSTIN / Tax ID',
+  customerTaxId: 'Buyer GSTIN / PAN / Tax ID',
+  warrantyStartDate: 'Warranty Start Date',
+  verificationUrl: 'Verification / Portal URL',
+  nomineeName: 'Nominee Name',
+  tpaName: 'TPA / Administrator',
+  deductibleAmount: 'Deductible / Excess',
+  hypothecation: 'Hypothecation / Financier',
+  pucExpiryDate: 'PUC Expiry Date',
+  odometerReading: 'Odometer Reading',
+  vehicleColor: 'Vehicle Color',
+  seatingCapacity: 'Seating Capacity',
+  rtoLocation: 'RTO / Registration Authority',
+  ifscOrBranch: 'IFSC / Bank Branch',
+  registrationNumber: 'Registration Number',
+  engineNumber: 'Engine Number',
+  chassisNumber: 'Chassis / VIN Number',
+  vehicleType: 'Vehicle Type',
+  fuelType: 'Fuel Type',
+  cubicCapacity: 'Cubic Capacity (CC)',
+  registrationYear: 'Registration Year',
+  policyType: 'Policy Type',
+  coverageType: 'Coverage Type',
+  idv: 'Insured Declared Value (IDV)',
+  ncbPercentage: 'NCB Percentage',
+  serviceTag: 'Service Tag',
+  expressServiceCode: 'Express Service Code',
+  assetId: 'Asset / System / Document ID',
+  coverageDetails: 'Support Coverage Scope',
+  storageOrSpecs: 'Processor / RAM / Storage Specs',
+  imeiOrMac: 'IMEI / MAC Address',
+  lensDetails: 'Lens / Sensor Details',
+  watchMovement: 'Movement / Case Material',
+  propertyAddress: 'Property Address',
+  deedNumber: 'Deed / Registration Number',
+  builtUpArea: 'Built-Up Area',
+  institutionName: 'Bank / Financial Institution',
+  accountOrFolioNumber: 'Account / Folio Number',
+  applianceType: 'Appliance Type',
+  capacity: 'Capacity / Power / Tonnage',
+  energyRating: 'Energy Star Rating',
+  material: 'Material / Finish',
+  jewelleryType: 'Jewellery Item Type',
+  metalPurity: 'Metal Purity (e.g. 22K / 925)',
+  grossWeightGrams: 'Gross / Net Weight (Grams)',
+  subscriptionPlan: 'Plan Tier',
+  billingCycle: 'Billing Cycle',
+};
+
 const ALL_EXTRACTED_EXTRA_KEYS = [
+  'policyNumber',
+  'orderNumber',
+  'subtotalAmount',
+  'taxAmount',
+  'discountAmount',
+  'paymentMethod',
+  'paymentStatus',
+  'customerAddress',
+  'vendorAddress',
+  'vendorTaxId',
+  'customerTaxId',
+  'warrantyStartDate',
+  'nomineeName',
+  'tpaName',
+  'deductibleAmount',
+  'hypothecation',
+  'pucExpiryDate',
+  'odometerReading',
+  'vehicleColor',
+  'seatingCapacity',
+  'rtoLocation',
+  'ifscOrBranch',
   'registrationNumber',
   'engineNumber',
   'chassisNumber',
@@ -263,6 +346,17 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
   );
   const [newContact, setNewContact] = useState('');
 
+  // Line items & custom additional document key-value details extracted by OCR
+  const [lineItems, setLineItems] = useState<ExtractedLineItem[]>(() =>
+    Array.isArray(extractedData.lineItems) ? extractedData.lineItems : []
+  );
+
+  const [additionalDetails, setAdditionalDetails] = useState<ExtractedKeyValue[]>(() =>
+    Array.isArray(extractedData.additionalDetails) ? extractedData.additionalDetails : []
+  );
+  const [newDetailLabel, setNewDetailLabel] = useState('');
+  const [newDetailValue, setNewDetailValue] = useState('');
+
   // Category-specific & extra extracted attributes
   const [categoryFields, setCategoryFields] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
@@ -275,7 +369,7 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
     return initial;
   });
 
-  const [showRawOcr, setShowRawOcr] = useState(false);
+  const [showRawOcr, setShowRawOcr] = useState(Boolean(extractedData.rawText));
   const [validationError, setValidationError] = useState<string | null>(null);
 
   // Calculate Expiry Status for UX feedback
@@ -300,16 +394,20 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
 
     Object.keys(categoryFields).forEach((k) => {
       if (!seen.has(k) && categoryFields[k]) {
+        // Avoid duplicating serialNumber if policyNumber is identical to serialNumber
+        if (k === 'policyNumber' && categoryFields[k] === serialNumber) return;
         seen.add(k);
         activeDefs.push({
           key: k,
-          label: k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase()),
+          label:
+            FIELD_LABELS[k] ||
+            k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase()),
         });
       }
     });
 
     return activeDefs;
-  }, [category, categoryFields]);
+  }, [category, categoryFields, serialNumber]);
 
   const updateCatField = (key: string, val: string) => {
     setCategoryFields((prev) => ({
@@ -333,6 +431,30 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
     });
     if (renewalDate.trim()) cleanedCatFields.renewalDate = renewalDate.trim();
     if (verificationUrl.trim()) cleanedCatFields.verificationUrl = verificationUrl.trim();
+
+    const finalExtraDetails: ExtractedKeyValue[] = [
+      ...additionalDetails
+        .map((d) => ({ label: d.label.trim(), value: d.value.trim() }))
+        .filter((d) => d.label && d.value),
+      ...(newDetailLabel.trim() && newDetailValue.trim()
+        ? [{ label: newDetailLabel.trim(), value: newDetailValue.trim() }]
+        : []),
+    ];
+    for (const item of finalExtraDetails) {
+      cleanedCatFields[`detail__${item.label}`] = item.value;
+    }
+
+    const cleanedLineItems = lineItems
+      .map((li) => ({
+        description: li.description.trim(),
+        ...(li.quantity?.trim() ? { quantity: li.quantity.trim() } : {}),
+        ...(li.unitPrice?.trim() ? { unitPrice: li.unitPrice.trim() } : {}),
+        ...(li.amount?.trim() ? { amount: li.amount.trim() } : {}),
+      }))
+      .filter((li) => li.description || li.amount);
+    if (cleanedLineItems.length > 0) {
+      cleanedCatFields.__lineItemsJson = JSON.stringify(cleanedLineItems);
+    }
 
     const finalAddOns = [
       ...addOns.map((s) => s.trim()).filter(Boolean),
@@ -744,7 +866,107 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
                     className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-2.5 text-[#EDEDE1] font-mono tabular-nums placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs transition-colors"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
+                    Order / Booking / Ref ID
+                  </label>
+                  <input
+                    type="text"
+                    value={categoryFields.orderNumber || ''}
+                    onChange={(e) => updateCatField('orderNumber', e.target.value)}
+                    placeholder="Not provided"
+                    className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-2.5 text-[#EDEDE1] font-mono tabular-nums placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
+                    Verification / Portal URL
+                  </label>
+                  <input
+                    type="text"
+                    value={verificationUrl}
+                    onChange={(e) => setVerificationUrl(e.target.value)}
+                    placeholder="Not provided"
+                    className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-2.5 text-[#EDEDE1] font-mono placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs transition-colors"
+                  />
+                </div>
               </div>
+
+              {/* Extracted Line Items / Premium Breakdown Table */}
+              {lineItems.length > 0 && (
+                <div className="pt-3 border-t border-[#2A3B33] space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-[#C9A15D] uppercase tracking-wider">
+                      Extracted Line Items &amp; Charges ({lineItems.length})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLineItems([
+                          ...lineItems,
+                          { description: '', quantity: '', unitPrice: '', amount: '' },
+                        ])
+                      }
+                      className="text-[11px] font-mono text-[#E4C98A] hover:underline flex items-center gap-1"
+                    >
+                      <Plus size={12} /> Add Row
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {lineItems.map((item, idx) => (
+                      <div
+                        key={idx}
+                        className="grid grid-cols-12 gap-2 items-center bg-[#16261F] border border-[#2A3B33] rounded-xl p-2"
+                      >
+                        <input
+                          type="text"
+                          value={item.description}
+                          onChange={(e) => {
+                            const next = [...lineItems];
+                            next[idx] = { ...next[idx], description: e.target.value };
+                            setLineItems(next);
+                          }}
+                          placeholder="Item / Cover description"
+                          className="col-span-12 sm:col-span-6 bg-transparent border-b sm:border-b-0 border-[#2A3B33] pb-1 sm:pb-0 text-[#EDEDE1] focus:border-[#C9A15D] outline-none text-xs"
+                        />
+                        <input
+                          type="text"
+                          value={item.quantity || ''}
+                          onChange={(e) => {
+                            const next = [...lineItems];
+                            next[idx] = { ...next[idx], quantity: e.target.value };
+                            setLineItems(next);
+                          }}
+                          placeholder="Qty"
+                          className="col-span-3 sm:col-span-2 bg-[#1C2E26] border border-[#2A3B33] rounded-lg px-2 py-1 text-[#EDEDE1] font-mono tabular-nums text-[11px] outline-none focus:border-[#C9A15D]"
+                        />
+                        <input
+                          type="text"
+                          value={item.amount || item.unitPrice || ''}
+                          onChange={(e) => {
+                            const next = [...lineItems];
+                            next[idx] = { ...next[idx], amount: e.target.value };
+                            setLineItems(next);
+                          }}
+                          placeholder="Amount"
+                          className="col-span-7 sm:col-span-3 bg-[#1C2E26] border border-[#2A3B33] rounded-lg px-2 py-1 text-[#E4C98A] font-mono tabular-nums text-[11px] outline-none focus:border-[#C9A15D]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setLineItems(lineItems.filter((_, i) => i !== idx))}
+                          className="col-span-2 sm:col-span-1 flex justify-center text-[#8FA79B] hover:text-[#C97B6B]"
+                          title="Remove item"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* CARD 3: WARRANTY & RENEWAL (PROMINENT EXPIRY UX) */}
@@ -849,30 +1071,120 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
                 </span>
               </div>
 
-              {/* Category Specific Extracted Attributes */}
-              {visibleCategoryFieldDefs.length > 0 && (
+              {/* Category & Document Specific Extracted Attributes */}
+              {visibleCategoryFieldDefs.filter((f) => f.key !== 'orderNumber').length > 0 && (
                 <div className="space-y-2">
                   <span className="text-[11px] font-mono text-[#C9A15D] uppercase tracking-wider block">
-                    {category} Specific Attributes
+                    Extracted Asset &amp; Document Specifications
                   </span>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {visibleCategoryFieldDefs.map((field) => (
-                      <div key={field.key}>
-                        <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
-                          {field.label}
-                        </label>
-                        <input
-                          type="text"
-                          value={categoryFields[field.key] || ''}
-                          onChange={(e) => updateCatField(field.key, e.target.value)}
-                          placeholder="Not provided"
-                          className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-2.5 text-[#EDEDE1] font-mono tabular-nums placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs transition-colors"
-                        />
-                      </div>
-                    ))}
+                    {visibleCategoryFieldDefs
+                      .filter((f) => f.key !== 'orderNumber')
+                      .map((field) => (
+                        <div key={field.key}>
+                          <label className="block text-[#8FA79B] font-mono text-[11px] mb-1">
+                            {field.label}
+                          </label>
+                          <input
+                            type="text"
+                            value={categoryFields[field.key] || ''}
+                            onChange={(e) => updateCatField(field.key, e.target.value)}
+                            placeholder="Not provided"
+                            className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-2.5 text-[#EDEDE1] font-mono tabular-nums placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs transition-colors"
+                          />
+                        </div>
+                      ))}
                   </div>
                 </div>
               )}
+
+              {/* Extra Document Key-Value Details Read by Scanner */}
+              <div className="space-y-2">
+                <label className="block text-[#C9A15D] font-mono text-[11px] uppercase tracking-wider">
+                  Other Extracted Document Details ({additionalDetails.length})
+                </label>
+                <div className="space-y-1.5">
+                  {additionalDetails.map((pair, idx) => (
+                    <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                      <input
+                        type="text"
+                        value={pair.label}
+                        onChange={(e) => {
+                          const next = [...additionalDetails];
+                          next[idx] = { ...next[idx], label: e.target.value };
+                          setAdditionalDetails(next);
+                        }}
+                        placeholder="Field label"
+                        className="col-span-5 bg-[#16261F] border border-[#2A3B33] rounded-xl px-3 py-2 text-[#8FA79B] font-mono focus:border-[#C9A15D] outline-none text-xs"
+                      />
+                      <input
+                        type="text"
+                        value={pair.value}
+                        onChange={(e) => {
+                          const next = [...additionalDetails];
+                          next[idx] = { ...next[idx], value: e.target.value };
+                          setAdditionalDetails(next);
+                        }}
+                        placeholder="Extracted value"
+                        className="col-span-6 bg-[#16261F] border border-[#2A3B33] rounded-xl px-3 py-2 text-[#EDEDE1] font-mono focus:border-[#C9A15D] outline-none text-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAdditionalDetails(additionalDetails.filter((_, i) => i !== idx))
+                        }
+                        className="col-span-1 flex justify-center p-2 text-[#8FA79B] hover:text-[#C97B6B]"
+                        title="Remove detail"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="grid grid-cols-12 gap-2 items-center">
+                    <input
+                      type="text"
+                      value={newDetailLabel}
+                      onChange={(e) => setNewDetailLabel(e.target.value)}
+                      placeholder="Custom field (e.g. HSN Code)..."
+                      className="col-span-5 bg-[#16261F] border border-[#2A3B33] rounded-xl px-3 py-2 text-[#EDEDE1] placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs"
+                    />
+                    <input
+                      type="text"
+                      value={newDetailValue}
+                      onChange={(e) => setNewDetailValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newDetailLabel.trim() && newDetailValue.trim()) {
+                          e.preventDefault();
+                          setAdditionalDetails([
+                            ...additionalDetails,
+                            { label: newDetailLabel.trim(), value: newDetailValue.trim() },
+                          ]);
+                          setNewDetailLabel('');
+                          setNewDetailValue('');
+                        }
+                      }}
+                      placeholder="Value..."
+                      className="col-span-5 bg-[#16261F] border border-[#2A3B33] rounded-xl px-3 py-2 text-[#EDEDE1] placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (newDetailLabel.trim() && newDetailValue.trim()) {
+                          setAdditionalDetails([
+                            ...additionalDetails,
+                            { label: newDetailLabel.trim(), value: newDetailValue.trim() },
+                          ]);
+                          setNewDetailLabel('');
+                          setNewDetailValue('');
+                        }
+                      }}
+                      className="col-span-2 px-2.5 py-2 bg-[#16261F] border border-[#2A3B33] hover:border-[#C9A15D] rounded-xl text-[#C9A15D] flex items-center justify-center gap-1 whitespace-nowrap text-xs"
+                    >
+                      <Plus size={13} /> Add
+                    </button>
+                  </div>
+                </div>
+              </div>
 
               {/* Add-ons */}
               <div className="space-y-2">
@@ -1081,11 +1393,11 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
                   Notes, Terms &amp; Key Highlights
                 </label>
                 <textarea
-                  rows={2}
+                  rows={3}
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   placeholder="Important terms, warranty exclusions, or notes..."
-                  className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-3 text-[#EDEDE1] placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs resize-y"
+                  className="w-full bg-[#16261F] border border-[#2A3B33] rounded-xl p-3 text-[#EDEDE1] placeholder-[#8FA79B]/40 focus:border-[#C9A15D] outline-none text-xs resize-y leading-relaxed"
                 />
               </div>
 
@@ -1094,15 +1406,19 @@ export const ExtractedAssetReviewForm: React.FC<ExtractedAssetReviewFormProps> =
                 <button
                   type="button"
                   onClick={() => setShowRawOcr(!showRawOcr)}
-                  className="flex items-center gap-1.5 text-[#8FA79B] hover:text-[#EDEDE1] font-mono text-[11px] transition-colors"
+                  className="flex items-center gap-1.5 text-[#E4C98A] hover:text-[#EDEDE1] font-mono text-[11px] transition-colors"
                 >
                   {showRawOcr ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                  <span>{showRawOcr ? 'Hide Raw OCR Text' : 'Inspect / Edit Raw OCR Text'}</span>
+                  <span>
+                    {showRawOcr
+                      ? 'Hide Complete OCR Transcript'
+                      : `Inspect / Edit Complete OCR Transcript (${rawText.length} chars)`}
+                  </span>
                 </button>
 
                 {showRawOcr && (
                   <textarea
-                    rows={4}
+                    rows={6}
                     value={rawText}
                     onChange={(e) => setRawText(e.target.value)}
                     placeholder="Raw OCR text extracted from document..."

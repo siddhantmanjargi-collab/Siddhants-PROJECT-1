@@ -76,6 +76,18 @@ export interface User {
   isGuest: boolean;
 }
 
+export interface ExtractedLineItem {
+  description: string;
+  quantity?: string;
+  unitPrice?: string;
+  amount?: string;
+}
+
+export interface ExtractedKeyValue {
+  label: string;
+  value: string;
+}
+
 export interface ScanResultData {
   category: AssetCategory;
   docType: DocumentType;
@@ -94,11 +106,33 @@ export interface ScanResultData {
   serialNumber?: string;
   policyNumber?: string;
   invoice?: string;
+  orderNumber?: string;
   verificationUrl?: string;
   notes?: string;
   addOns?: string[];
   reminders?: string[];
   contacts?: string[];
+  lineItems?: ExtractedLineItem[];
+  additionalDetails?: ExtractedKeyValue[];
+  customerAddress?: string;
+  vendorAddress?: string;
+  vendorTaxId?: string;
+  customerTaxId?: string;
+  paymentMethod?: string;
+  paymentStatus?: string;
+  subtotalAmount?: string;
+  taxAmount?: string;
+  discountAmount?: string;
+  nomineeName?: string;
+  tpaName?: string;
+  deductibleAmount?: string;
+  hypothecation?: string;
+  pucExpiryDate?: string;
+  odometerReading?: string;
+  vehicleColor?: string;
+  seatingCapacity?: string;
+  rtoLocation?: string;
+  ifscOrBranch?: string;
   registrationNumber?: string;
   engineNumber?: string;
   chassisNumber?: string;
@@ -135,4 +169,5 @@ export interface ScanResultData {
   subscriptionPlan?: string;
   billingCycle?: string;
   rawText?: string;
+  pagesProcessed?: number;
 }
